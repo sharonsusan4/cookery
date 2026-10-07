@@ -2,8 +2,8 @@
 // Always tries the network first, so updates show up straight away.
 // Requests to the sheet and to thumbnails are left alone.
 
-const CACHE = 'recipes-v1';
-const FILES = ['./', 'index.html', 'styles.css', 'app.js', 'links.js', 'manifest.webmanifest', 'icons/icon-192.png'];
+const CACHE = 'recipes-v2';
+const FILES = ['./', 'index.html', 'styles.css', 'app.js', 'links.js', 'welcome.js', 'manifest.webmanifest', 'icons/icon-192.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));

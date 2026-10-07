@@ -363,6 +363,27 @@ function renderToday() {
 
 // ---------- views: Recipes ----------
 
+// Each category gets its own soft colour on the recipe squares.
+const TINTS = {
+  'Breakfast': 'yellow',
+  'Lunch': 'green',
+  'Dinner': 'blue',
+  'Main Course': 'orange',
+  'Side Dish': 'olive',
+  'Appetizer/Snack': 'plum',
+  'Sweet Snack/Mithai': 'pink',
+  'Dessert': 'pink',
+  'Bread/Baking': 'brown',
+  'Soup': 'teal',
+  'Salad': 'green',
+  'Drink/Beverage': 'teal',
+  'Sauce/Condiment': 'red',
+};
+
+function tintFor(category) {
+  return TINTS[category] || 'gray';
+}
+
 function filteredRecipes() {
   const f = state.filters;
   const q = f.q.trim().toLowerCase();
@@ -405,7 +426,7 @@ function renderRecipes() {
     </div>`}
 
     <p class="muted small" id="count" style="margin-top:14px"></p>
-    <div id="list" class="list"></div>
+    <div id="list" class="squares"></div>
 
     ${f.showRemoved
       ? '<button class="link-btn" data-action="hide-removed">Back to recipes</button>'
@@ -424,14 +445,12 @@ function renderList() {
     return;
   }
   el.innerHTML = list.map(r => {
-    const src = thumbUrl(r);
-    const status = statusOf(r) === STATUS.toTry && !isRemoved(r) ? '' : ` · ${statusLabel(r)}`;
-    return `<a class="item" href="#recipe/${r.row}">
-      <span class="mini">${src ? `<img src="${esc(src)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</span>
-      <span class="text">
-        <span class="name${String(r.name).trim() ? '' : ' untitled'}">${esc(displayName(r))}</span>
-        <span class="sub">${esc(categoryOf(r) || 'No category')}${esc(status)}</span>
-      </span>
+    const category = categoryOf(r);
+    const status = statusOf(r) === STATUS.toTry && !isRemoved(r) ? '' : statusLabel(r);
+    return `<a class="square tint-${tintFor(category)}" href="#recipe/${r.row}">
+      <span class="cat">${esc(category || 'No category')}</span>
+      <span class="name${String(r.name).trim() ? '' : ' untitled'}">${esc(displayName(r))}</span>
+      ${status ? `<span class="status">${esc(status)}</span>` : ''}
     </a>`;
   }).join('');
 }
@@ -874,6 +893,8 @@ async function start() {
     setDraftLink(shared);
   } else {
     render();
+    // "Hi Mom" each time she opens the app, but not when she's sharing a link in.
+    if (state.config) Welcome.show();
   }
 
   if (state.config && !state.loadedAt) loadRecipes({ quiet: state.recipes.length > 0 });
