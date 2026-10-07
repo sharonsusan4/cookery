@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Recipes</title>
+  <meta name="theme-color" content="#fbf7f2" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1c1714" media="(prefers-color-scheme: dark)">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main id="view" aria-live="polite"></main>
+
+  <nav class="tabs" aria-label="Main">
+    <a href="#today" data-tab="today">Today</a>
+    <a href="#recipes" data-tab="recipes">Recipes</a>
+    <a href="#add" data-tab="add">Add</a>
+  </nav>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="links.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
