@@ -918,7 +918,7 @@ async function start() {
     setDraftLink(shared);
   } else {
     render();
-    // "Hi Mom" each time she opens the app, but not when she's sharing a link in.
+    // "Yo Mom" each time she opens the app, but not when she's sharing a link in.
     if (state.config) {
       const tiles = welcomeTiles();
       Welcome.show(tiles, Math.floor(Math.random() * tiles.length), usePick);

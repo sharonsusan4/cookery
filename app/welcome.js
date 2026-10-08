@@ -1,10 +1,10 @@
 'use strict';
 
-// The "Hi Mom" welcome screen picks today's dish.
+// The "Yo Mom" welcome screen picks today's dish.
 //
 // Nine of her recipes are dealt face down from a stack into a grid, flip over
 // one by one, then a highlight hops between them, slowing down like a roulette
-// wheel, and lands on one. It pops forward, the rest dim, and "Hi Mom" asks
+// wheel, and lands on one. It pops forward, the rest dim, and "Yo Mom" asks
 // "How about … today?". "Let's cook" opens the app with that dish suggested.
 // About 2.2 seconds; tapping skips to the end.
 //
@@ -52,7 +52,7 @@ const Welcome = (() => {
             <div class="face front square tint-${esc(r.tint)}"><span class="cat">${esc(r.category)}</span><span class="name">${esc(r.name)}</span></div>
           </div>`).join('')}
       </div>` : ''}
-      <h1 class="welcome-title"><span class="hi">Hi</span> <span class="mom">Mom</span></h1>
+      <h1 class="welcome-title"><span class="hi">Yo</span> <span class="mom">Mom</span></h1>
       <p class="welcome-caption">${chosen ? `How about <b>${esc(chosen.name)}</b> today?` : 'What shall we cook today?'}</p>
       <div class="welcome-actions"><button class="primary block welcome-enter" type="button">Let’s cook</button></div>
     `;
