@@ -853,6 +853,31 @@ async function saveCookNote(btn) {
 
 // ---------- start ----------
 
+/** Nine of her Loved recipes for the welcome screen, drawn at random each time she opens the app. */
+function welcomeTiles() {
+  const named = state.recipes.filter(r => String(r.name).trim() && !isRemoved(r));
+  const loved = named.filter(r => statusOf(r) === STATUS.loved);
+  const pool = [...(loved.length >= 9 ? loved : named)];
+  // Shuffle, then take the first nine.
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, 9).map(r => ({ row: r.row, name: displayName(r), category: categoryOf(r) || 'Recipe', tint: tintFor(categoryOf(r)) }));
+}
+
+/** The welcome screen picked a dish: show it as today's suggestion. */
+function usePick(tile) {
+  const r = tile && findRecipe(tile.row);
+  if (r) {
+    state.meal = 'Anything';
+    state.mode = statusOf(r) === STATUS.loved ? 'fav' : 'new';
+    state.suggestion = { row: r.row };
+  }
+  if (location.hash !== '#today') location.hash = '#today';
+  else render();
+}
+
 function readSetupLink() {
   // Setup link: …/#setup=<web app url>&key=<key>. Kept in the # part so it never reaches a server.
   if (!location.hash.startsWith('#setup=')) return null;
@@ -894,7 +919,10 @@ async function start() {
   } else {
     render();
     // "Hi Mom" each time she opens the app, but not when she's sharing a link in.
-    if (state.config) Welcome.show();
+    if (state.config) {
+      const tiles = welcomeTiles();
+      Welcome.show(tiles, Math.floor(Math.random() * tiles.length), usePick);
+    }
   }
 
   if (state.config && !state.loadedAt) loadRecipes({ quiet: state.recipes.length > 0 });

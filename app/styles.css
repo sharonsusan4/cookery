@@ -181,30 +181,48 @@ button:disabled { opacity: 0.6; }
 
 /* "Hi Mom" welcome screen (welcome.js) */
 .welcome-overlay {
-  --w-bg: #102820;
-  --w-paper: #f4e9d5;
-  --w-accent: #f2b544;
   position: fixed; inset: 0; z-index: 30;
-  background: var(--w-bg);
+  background: var(--bg);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 28px;
   padding: 24px 16px calc(24px + env(safe-area-inset-bottom));
+  text-align: center;
+  overflow: hidden;
 }
 body.welcome-open { overflow: hidden; }
-.welcome-stage { width: min(100%, 560px, 70vh); height: auto; display: block; }
-.w-serif { font-family: "Playfair Display", "Iowan Old Style", Georgia, serif; font-style: italic; font-weight: 700; font-size: 200px; fill: var(--w-paper); }
-.w-grot { font-family: "Archivo Black", "Arial Black", "Helvetica Neue", sans-serif; font-weight: 900; fill: var(--w-paper); }
-.w-mono { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-weight: 500; font-size: 30px; letter-spacing: 3px; fill: var(--w-paper); }
-#w-caption { fill: var(--w-accent); }
-.w-floor { fill: var(--w-accent); }
-.w-cable { stroke: var(--w-accent); stroke-width: 3; }
-.w-support { stroke: var(--w-paper); stroke-width: 3; opacity: 0.55; }
-.welcome-actions { width: min(100%, 560px); }
-.welcome-enter {
-  width: 100%;
-  background: var(--w-accent); color: var(--w-bg); border-color: var(--w-accent);
-  font-weight: 600; font-size: 18px; min-height: 54px;
+.welcome-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;
+  width: min(100%, 340px);
+  margin-bottom: 28px;
+  text-align: left;
 }
+.welcome-grid .card { position: relative; aspect-ratio: 1; transform-style: preserve-3d; will-change: transform; }
+.welcome-grid .face {
+  position: absolute; inset: 0;
+  border-radius: 14px;
+  backface-visibility: hidden; -webkit-backface-visibility: hidden;
+}
+.welcome-grid .back {
+  transform: rotateY(180deg);
+  background-image: radial-gradient(color-mix(in srgb, currentColor 30%, transparent) 1.4px, transparent 1.8px);
+  background-size: 12px 12px;
+  background-position: 6px 6px;
+}
+.welcome-grid .front { aspect-ratio: auto; }
+.welcome-grid .front .name { font-size: 14px; -webkit-line-clamp: 3; }
+.welcome-grid .card.lit .front { box-shadow: 0 0 0 3px var(--accent); }
+.welcome-caption b { color: var(--text); font-weight: 600; }
+.welcome-title {
+  font-family: "Playfair Display", "Iowan Old Style", Georgia, serif;
+  font-style: italic; font-weight: 700;
+  font-size: clamp(52px, 16vw, 84px);
+  letter-spacing: -1px; line-height: 1.1;
+  margin: 0 0 8px;
+}
+.welcome-title .hi { color: var(--accent); }
+.welcome-title .mom { color: var(--text); }
+.welcome-caption { color: var(--text-2); font-size: 18px; margin: 0 0 28px; }
+.welcome-actions { width: min(100%, 340px); }
+.welcome-enter { min-height: 54px; font-size: 18px; }
 
 /* Recipe squares */
 .squares { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 4px; }

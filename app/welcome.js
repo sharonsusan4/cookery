@@ -1,198 +1,141 @@
 'use strict';
 
-// The "Hi Mom" welcome screen.
+// The "Hi Mom" welcome screen picks today's dish.
 //
-// The words are built like a structure: a gold floor draws out, two supports
-// hold it up, "Hi" arrives on a thin lintel, "MOM" is lowered from that lintel
-// onto the floor on two cables, the floor gives under the load and settles
-// level, the cables let go, then a pause before the button.
-// Tapping the button opens the counter of the O into a hole the app shows through.
+// Nine of her recipes are dealt face down from a stack into a grid, flip over
+// one by one, then a highlight hops between them, slowing down like a roulette
+// wheel, and lands on one. It pops forward, the rest dim, and "Hi Mom" asks
+// "How about … today?". "Let's cook" opens the app with that dish suggested.
+// About 2.2 seconds; tapping skips to the end.
 //
-// Every frame comes from seek(t) alone (no physics that builds up over time),
-// so a given moment always looks the same. window.seekWelcome(t) shows any moment.
+// Every frame comes from seek(t) alone, so a given moment always looks the
+// same. window.seekWelcome(t) shows any moment.
 
 const Welcome = (() => {
-  const W = 1080; // the stage is a 1080×1080 square, scaled to the phone
-  const FLOOR_Y = 700;
-  const LINTEL_Y = 352; // "Hi" sits on this; MOM hangs from it and never crosses above it
-  const FLOOR_H = 14;
-  const FLOOR_HALF = 450;
-  const SUPPORTS = [200, 880];
-  const MOM_WIDTH = 860;
-  const CAPTION = 'WHAT SHALL WE COOK TODAY?';
-
-  // Cue sheet, in seconds.
   const T = {
-    floor: [0.2, 0.9],
-    supports: [0.6, 1.2],
-    hi: [1.0, 1.6],
-    lower: 1.6, // MOM starts coming down
-    contact: 2.45, // MOM meets the floor
-    release: [2.9, 3.3], // cables let go
-    // 3.3 to 3.7: everything holds still
-    caption: [3.7, 4.4],
-    button: [4.2, 4.7],
+    deal: 0.0, dealGap: 0.04, dealTime: 0.42, // cards fly out of the stack
+    flip: 0.38, flipGap: 0.045, flipTime: 0.32, // and turn over in reading order
+    spin: [0.95, 1.75], // highlight hops, slowing down
+    pop: [1.75, 2.0], // chosen card comes forward
+    words: [1.8, 2.2],
   };
-  const END = 4.7;
-  const EXIT = 0.65;
+  const END = 2.2;
+  const EXIT = 0.35;
+  const GAP = 8;
+  // The highlight goes round the grid in a ring, like a wheel.
+  const RING = [0, 1, 2, 5, 8, 7, 6, 3, 4];
+  // Small fixed tilts for the dealt cards, so the stack looks hand-dealt.
+  const TILT = [-7, 5, -3, 8, -6, 3, -9, 6, -4];
 
-  let root, svg, el = {}, momSize = 300, raf = 0, startedAt = 0, done = null;
-
-  // ---- time helpers (all pure functions of t) ----
+  let root, el = {}, raf = 0, done = null, tiles = [], pick = 0, hops = [];
 
   const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
   const progress = (t, [a, b]) => clamp((t - a) / (b - a));
   const easeOut = p => 1 - Math.pow(1 - p, 3);
-  const easeInOut = p => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
   const easeIn = p => p * p * p;
+  const easeInOut = p => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
+  const easeOutBack = p => { const c = 1.7; return 1 + (c + 1) * Math.pow(p - 1, 3) + c * Math.pow(p - 1, 2); };
 
-  /** Critically damped approach: from `from` to 0 with no overshoot. */
-  function settle(t, t0, from, omega) {
-    if (t <= t0) return from;
-    const s = t - t0;
-    const v = from * (1 + omega * s) * Math.exp(-omega * s);
-    return Math.abs(v) < 0.05 ? 0 : v; // come to an exact stop rather than creeping forever
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
-
-  /** The floor's give under the load: a damped bounce that ends perfectly level. */
-  function sag(t) {
-    if (t <= T.contact || t >= T.release[0]) return 0; // level for good before the cables let go
-    const s = t - T.contact;
-    const zeta = 0.38, omega = 17;
-    const wd = omega * Math.sqrt(1 - zeta * zeta);
-    return 13 * Math.exp(-zeta * omega * s) * Math.sin(wd * s);
-  }
-
-  // ---- building the scene ----
 
   function build() {
-    const date = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: 'short' }).toUpperCase();
     root = document.createElement('div');
     root.className = 'welcome-overlay';
+    const chosen = tiles[pick];
     root.innerHTML = `
-      <svg class="welcome-stage" viewBox="0 0 ${W} ${W}" role="img" aria-label="Hi Mom">
-        <defs>
-          <clipPath id="w-hi-clip"><rect x="0" y="120" width="${W}" height="${LINTEL_Y - 122}"/></clipPath>
-          <clipPath id="w-mom-clip"><rect x="0" y="${LINTEL_Y + 2}" width="${W}" height="${W}"/></clipPath>
-        </defs>
-        <text id="w-date" class="w-mono" x="90" y="110">${esc(date)}</text>
-        <g clip-path="url(#w-hi-clip)"><text id="w-hi" class="w-serif" x="84" y="330">Hi</text></g>
-        <line id="w-lintel" class="w-support"/>
-        <line id="w-cable-l" class="w-cable"/>
-        <line id="w-cable-r" class="w-cable"/>
-        <line id="w-sup-l" class="w-support"/>
-        <line id="w-sup-r" class="w-support"/>
-        <g clip-path="url(#w-mom-clip)"><text id="w-mom" class="w-grot" x="${W / 2}" y="${FLOOR_Y}" text-anchor="middle">MOM</text></g>
-        <path id="w-floor" class="w-floor"/>
-        <text id="w-caption" class="w-mono" x="${W / 2}" y="800"></text>
-      </svg>
-      <div class="welcome-actions">
-        <button class="welcome-enter" type="button">Let’s cook</button>
-      </div>
+      ${tiles.length ? `<div class="welcome-grid" aria-hidden="true">
+        ${tiles.map(r => `
+          <div class="card">
+            <div class="face back tint-${esc(r.tint)}"></div>
+            <div class="face front square tint-${esc(r.tint)}"><span class="cat">${esc(r.category)}</span><span class="name">${esc(r.name)}</span></div>
+          </div>`).join('')}
+      </div>` : ''}
+      <h1 class="welcome-title"><span class="hi">Hi</span> <span class="mom">Mom</span></h1>
+      <p class="welcome-caption">${chosen ? `How about <b>${esc(chosen.name)}</b> today?` : 'What shall we cook today?'}</p>
+      <div class="welcome-actions"><button class="primary block welcome-enter" type="button">Let’s cook</button></div>
     `;
-    svg = root.querySelector('svg');
-    for (const id of ['date', 'hi', 'lintel', 'cable-l', 'cable-r', 'sup-l', 'sup-r', 'mom', 'floor', 'caption']) {
-      el[id] = root.querySelector('#w-' + id);
-    }
-    el.button = root.querySelector('.welcome-enter');
+    el.cards = [...root.querySelectorAll('.welcome-grid .card')];
+    el.title = root.querySelector('.welcome-title');
+    el.caption = root.querySelector('.welcome-caption');
     el.actions = root.querySelector('.welcome-actions');
+    el.button = root.querySelector('.welcome-enter');
+
+    // Highlight hop times: at least one full lap, ending on the chosen card,
+    // with the gaps growing so it slows down like a wheel.
+    const n = tiles.length;
+    const ring = RING.filter(i => i < n);
+    const stops = ring.length + ring.indexOf(pick) + 1;
+    hops = Array.from({ length: stops }, (_, k) => ({
+      card: ring[k % ring.length],
+      at: T.spin[0] + (T.spin[1] - T.spin[0]) * Math.pow(k / (stops - 1), 1.8),
+    }));
   }
 
-  /** Size MOM to span the floor and place the caption, once the fonts are in. Done once, before playing. */
-  function fitMom() {
-    el.mom.setAttribute('font-size', 300);
-    const len = el.mom.getComputedTextLength();
-    momSize = len > 0 ? 300 * MOM_WIDTH / len : 300;
-    el.mom.setAttribute('font-size', momSize.toFixed(1));
-    // Pin the caption's left edge where the full line would start, so typing doesn't shift it.
-    el.caption.textContent = CAPTION;
-    el.caption.setAttribute('x', (W / 2 - el.caption.getComputedTextLength() / 2).toFixed(1));
+  /** Where each card sits relative to the middle of the grid, to deal from there. */
+  function offsets() {
+    const size = el.cards[0] ? el.cards[0].offsetWidth : 0;
+    return el.cards.map((_, i) => {
+      const col = i % 3, row = Math.floor(i / 3);
+      return { x: (1 - col) * (size + GAP), y: (1 - row) * (size + GAP) + 40 };
+    });
   }
-
-  const capHeight = () => momSize * 0.72;
 
   // ---- the renderer: everything on screen is a function of t ----
 
   function seek(t) {
     t = clamp(t, 0, END);
+    const from = offsets();
 
-    // Floor: draws out from the centre, flexes under MOM, ends level.
-    const half = FLOOR_HALF * easeOut(progress(t, T.floor));
-    const s = sag(t);
-    const x0 = W / 2 - half, x1 = W / 2 + half, c = 2 * s; // control point at 2× gives a midpoint dip of s
-    el.floor.setAttribute('d', half < 0.5 ? '' :
-      `M${x0},${FLOOR_Y} Q${W / 2},${FLOOR_Y + c} ${x1},${FLOOR_Y} L${x1},${FLOOR_Y + FLOOR_H} Q${W / 2},${FLOOR_Y + FLOOR_H + c} ${x0},${FLOOR_Y + FLOOR_H} Z`);
+    // Which card the highlight is on right now.
+    let lit = -1;
+    for (const h of hops) if (t >= h.at) lit = h.card;
+    const landed = t >= T.spin[1];
+    const pop = easeOutBack(progress(t, T.pop));
 
-    // Supports: drop from the floor to the bottom edge.
-    const supLen = (W - FLOOR_Y - FLOOR_H) * easeOut(progress(t, T.supports));
-    SUPPORTS.forEach((x, i) => {
-      const line = el[i ? 'sup-r' : 'sup-l'];
-      line.setAttribute('x1', x); line.setAttribute('x2', x);
-      line.setAttribute('y1', FLOOR_Y + FLOOR_H); line.setAttribute('y2', FLOOR_Y + FLOOR_H + supLen);
+    el.cards.forEach((card, i) => {
+      // Deal: from the stack in the middle, tilted, to its place.
+      const d = easeOut(clamp((t - T.deal - i * T.dealGap) / T.dealTime));
+      const x = from[i].x * (1 - d), y = from[i].y * (1 - d);
+      const tilt = TILT[i] * (1 - d);
+      // Flip: face down to face up.
+      const f = easeInOut(clamp((t - T.flip - i * T.flipGap) / T.flipTime));
+      const turn = 180 - 180 * f;
+      // After the pick: the chosen card comes forward, the others step back.
+      const chosen = i === pick && landed;
+      const scale = chosen ? 1 + 0.08 * pop : 1 - 0.04 * (landed ? pop : 0);
+      card.style.transform = `perspective(700px) translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) rotate(${tilt.toFixed(2)}deg) scale(${scale.toFixed(3)}) rotateY(${turn.toFixed(1)}deg)`;
+      card.style.opacity = (d > 0 ? 1 : 0) * (landed && !chosen ? 1 - 0.55 * clamp(pop) : 1);
+      card.style.zIndex = chosen ? 2 : (d < 1 ? 1 + i : 0);
+      card.classList.toggle('lit', i === lit && f >= 1);
     });
 
-    // "Hi": rises up out of its own baseline.
-    const hiP = progress(t, T.hi);
-    el.hi.setAttribute('transform', `translate(0 ${(190 * (1 - easeOut(hiP))).toFixed(2)})`);
-
-    // Lintel: drawn left to right under "Hi" as it arrives.
-    const lintelEnd = 84 + (W - 84 - 84) * easeOut(hiP);
-    el.lintel.setAttribute('x1', 84); el.lintel.setAttribute('x2', lintelEnd.toFixed(2));
-    el.lintel.setAttribute('y1', LINTEL_Y); el.lintel.setAttribute('y2', LINTEL_Y);
-    el.lintel.style.visibility = hiP > 0 ? 'visible' : 'hidden';
-
-    // MOM: lowered out of the slot under the lintel (critically damped), then rides the floor's flex.
-    const start = (LINTEL_Y - capHeight()) - (FLOOR_Y - capHeight()) - 12; // fully hidden above the slot
-    const drop = settle(t, T.lower, start, 7.5);
-    const momY = drop + s * 0.85;
-    el.mom.setAttribute('transform', `translate(0 ${momY.toFixed(2)})`);
-
-    // Cables: hang from the lintel to MOM's shoulders, then draw back up into it.
-    const top = FLOOR_Y - capHeight() + momY;
-    const rel = easeInOut(progress(t, T.release));
-    const cableEnd = LINTEL_Y + Math.max(0, top - LINTEL_Y) * (1 - rel);
-    [W / 2 - MOM_WIDTH * 0.36, W / 2 + MOM_WIDTH * 0.36].forEach((x, i) => {
-      const line = el[i ? 'cable-r' : 'cable-l'];
-      line.setAttribute('x1', x); line.setAttribute('x2', x);
-      line.setAttribute('y1', LINTEL_Y); line.setAttribute('y2', cableEnd.toFixed(2));
-      line.style.visibility = t >= T.lower && rel < 1 ? 'visible' : 'hidden';
-    });
-
-    // Date: a quiet fade in at the start.
-    el.date.style.opacity = (0.7 * easeOut(progress(t, [0, 0.6]))).toFixed(3);
-
-    // Caption: typed out in reading order after the pause.
-    el.caption.textContent = CAPTION.slice(0, Math.round(CAPTION.length * progress(t, T.caption)));
-
-    // Button: rises into place last.
-    const bp = easeOut(progress(t, T.button));
+    const wp = progress(t, T.words);
+    el.title.style.opacity = easeOut(wp).toFixed(3);
+    el.title.style.transform = `translateY(${(14 * (1 - easeOutBack(wp))).toFixed(2)}px)`;
+    el.caption.style.opacity = easeOut(clamp(wp * 1.3 - 0.15)).toFixed(3);
+    const bp = easeOut(clamp(wp * 1.4 - 0.3));
     el.actions.style.opacity = bp.toFixed(3);
-    el.actions.style.transform = `translateY(${(16 * (1 - bp)).toFixed(2)}px)`;
-    el.actions.style.pointerEvents = bp > 0.5 ? 'auto' : 'none';
+    el.actions.style.transform = `translateY(${(10 * (1 - bp)).toFixed(2)}px)`;
+    el.actions.style.pointerEvents = bp > 0.3 ? 'auto' : 'none';
   }
 
-  // ---- exit: the O's counter opens into the app ----
-
-  function counterCentre() {
-    // MOM is centred, so the O sits at the middle; its counter is about halfway up the capitals.
-    const pt = svg.createSVGPoint();
-    pt.x = W / 2;
-    pt.y = FLOOR_Y - capHeight() / 2;
-    const p = pt.matrixTransform(svg.getScreenCTM());
-    const r = momSize * 0.11 * svg.getScreenCTM().a;
-    return { x: p.x, y: p.y, r };
-  }
+  // ---- exit: a circle opens out of the button ----
 
   function exit() {
     cancelAnimationFrame(raf);
     el.button.disabled = true;
-    const { x, y, r } = counterCentre();
+    const b = el.button.getBoundingClientRect();
+    const x = b.left + b.width / 2, y = b.top + b.height / 2;
     const far = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
     const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // Show the app (with today's pick) underneath before the circle opens.
+    if (done) done(tiles[pick] || null);
     const t0 = performance.now();
     const frame = now => {
       const p = reduced ? 1 : clamp((now - t0) / 1000 / EXIT);
-      const R = r + (far - r) * easeIn(p);
+      const R = far * easeIn(p);
       const mask = `radial-gradient(circle at ${x}px ${y}px, transparent ${R}px, #000 ${R + 1}px)`;
       root.style.webkitMaskImage = mask;
       root.style.maskImage = mask;
@@ -207,15 +150,11 @@ const Welcome = (() => {
     root.remove();
     document.body.classList.remove('welcome-open');
     delete window.seekWelcome;
-    if (done) done();
   }
 
-  // ---- playing ----
-
   function play() {
-    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (reduced) return seek(END);
-    startedAt = performance.now();
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return seek(END);
+    const startedAt = performance.now();
     const tick = now => {
       const t = (now - startedAt) / 1000;
       seek(t);
@@ -224,33 +163,27 @@ const Welcome = (() => {
     raf = requestAnimationFrame(tick);
   }
 
-  function esc(s) {
-    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
   return {
-    /** Shows the welcome screen over the app. `onEnter` runs once it has gone. */
-    async show(onEnter) {
+    /**
+     * Shows the welcome screen over the app.
+     * list: up to 9 of her recipes as { row, name, category, tint }.
+     * chosen: index of today's pick. onEnter(pick) runs as she goes in.
+     */
+    show(list = [], chosen = 0, onEnter) {
+      tiles = list.slice(0, 9);
+      pick = tiles.length ? clamp(chosen, 0, tiles.length - 1) : 0;
       done = onEnter;
       build();
       document.body.appendChild(root);
       document.body.classList.add('welcome-open');
       seek(0);
-      try {
-        await Promise.race([document.fonts.ready, new Promise(r => setTimeout(r, 1500))]);
-      } catch (e) { /* use fallback fonts */ }
-      fitMom();
-      seek(0);
       el.button.addEventListener('click', exit);
-      // Tapping the picture skips to the end.
-      svg.addEventListener('click', () => {
-        if (performance.now() - startedAt < END * 1000) {
-          cancelAnimationFrame(raf);
-          startedAt = performance.now() - END * 1000;
-          seek(END);
-        }
+      // Tapping during the animation skips to the end.
+      root.addEventListener('click', e => {
+        if (e.target.closest('button')) return;
+        cancelAnimationFrame(raf);
+        seek(END);
       });
-      // For checking frames: pauses playback and shows moment t.
       window.seekWelcome = t => { cancelAnimationFrame(raf); seek(t); };
       play();
     },
