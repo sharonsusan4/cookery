@@ -3,7 +3,7 @@
 // Never touches /api/ (YouTube titles) or Supabase (her recipes and sign-in):
 // those must always be fresh, and the app keeps its own copy of the list.
 
-const CACHE = 'recipes-v4';
+const CACHE = 'recipes-v6';
 // The database library, pinned to the same version as in index.html. A pinned
 // version never changes, so it's served from the cache first.
 const LIBRARY = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js';

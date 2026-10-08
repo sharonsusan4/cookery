@@ -522,7 +522,16 @@ function renderToday() {
     </div>
 
     ${suggestionHtml()}
+
+    ${signOutHtml()}
   `;
+}
+
+/** A quiet "Sign out" at the bottom of Today, which is a short page, so it's easy to reach. */
+function signOutHtml() {
+  return `<div class="footer-action">
+    <button class="link-btn sign-out" data-action="sign-out">Sign out${state.user ? ` (${esc(state.user)})` : ''}</button>
+  </div>`;
 }
 
 // ---------- views: Recipes ----------
@@ -549,8 +558,9 @@ function tintFor(category) {
 }
 
 // ---------- ingredient search ----------
-// She types what she has ("tomato, chicken, cream") and the recipes using the
-// most of it come first. Words are compared in a simple form (lowercase,
+// She types what she has ("chicken, cream, cashew") and sees only the recipes
+// that use every one of them: no near-misses, no "2 of 3". That's what she
+// asked for; a different set of ingredients is a new search. Words are compared in a simple form (lowercase,
 // singular) and common Malayalam / Hindi names map to the English ones used
 // in the ingredient lists, so "tomatoes", "thakkali" and "tomato" all match.
 
@@ -570,7 +580,8 @@ function simpleWord(w) {
   w = w.toLowerCase();
   if (SAME_AS[w]) return SAME_AS[w];
   if (w.length > 4 && w.endsWith('oes')) w = w.slice(0, -2); // tomatoes, potatoes
-  else if (w.length > 4 && w.endsWith('ies')) w = w.slice(0, -2); // chillies
+  else if (w.length > 5 && w.endsWith('llies')) w = w.slice(0, -2); // chillies
+  else if (w.length > 4 && w.endsWith('ies')) w = w.slice(0, -3) + 'y'; // curries
   else if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss')) w = w.slice(0, -1); // onions, prawns
   return SAME_AS[w] || w;
 }
@@ -585,6 +596,32 @@ function hasPhrase(text, term) {
   return (' ' + text + ' ').includes(' ' + term + ' ');
 }
 
+// She searches by style ("chicken gravy", "chicken fry"), but most dish names
+// don't say "gravy": they say curry, handi, korma... So a style word also
+// matches any of the names that mean it. Checked against the dish name only.
+const STYLES = {
+  gravy: ['gravy', 'curry', 'masala', 'handi', 'korma', 'kurma', 'stew', 'salna', 'makhani', 'kolambu', 'kulambu',
+    'theeyal', 'moru', 'pulissery', 'malai', 'kofta', 'kadai', 'molly', 'mughlai', 'afghani', 'butter chicken', 'kali mirch'],
+  roast: ['roast', 'perattu', 'varattiyathu', 'ularthiyathu', 'chukka'],
+  fry: ['fry', 'fried', 'perattu', 'chukka', '65', 'kondattam', 'kondatam', 'pollichathu'],
+  kebab: ['kebab', 'kabab', 'tikka', 'tandoori'],
+  curry: ['curry', 'gravy', 'masala', 'stew', 'kolambu', 'kulambu', 'theeyal', 'moru', 'pulissery'],
+};
+
+/**
+ * Does a recipe have this search term? Style words ("gravy", "fry") look at the
+ * kind of dish in its name only, so "curry" doesn't match "curry leaves".
+ * Anything else looks in the name and ingredients. A phrase that isn't found
+ * as it is ("chicken gravy") needs each of its words instead.
+ */
+function termMatches(text, name, term) {
+  const styles = STYLES[term];
+  if (styles) return styles.some(v => hasPhrase(name, simplePhrase(v)));
+  if (hasPhrase(text, term)) return true;
+  const words = term.split(' ');
+  return words.length > 1 && words.every(w => termMatches(text, name, w));
+}
+
 /**
  * Reads the search box. A list ("tomato, chicken, cream", or "tomato and
  * chicken") is an ingredient search; a single word or a name is a normal search.
@@ -595,21 +632,13 @@ function readSearch(q) {
   return { mode: 'text', text: parts[0] || '' };
 }
 
-/** Which of her search terms a recipe uses (from its ingredients or its name). */
-function ingredientMatch(r, terms) {
-  const haystack = simplePhrase([...r.ingredients, r.name].join(' , '));
-  const have = [], missing = [];
-  for (const t of terms) (hasPhrase(haystack, t) ? have : missing).push(t);
-  return { have, missing };
-}
-
 /**
  * The recipes to show for the current filters and search box, with how well
  * each matches when it's an ingredient search: { mode, terms, items: [{ r, match }] }.
  */
 function runSearch() {
   const f = state.filters;
-  let search = readSearch(f.q.trim());
+  const search = readSearch(f.q.trim());
   const list = state.recipes.filter(r => {
     if (f.showRemoved !== isRemoved(r)) return false;
     if (!f.showRemoved && f.status !== 'all' && statusOf(r) !== f.status) return false;
@@ -617,28 +646,29 @@ function runSearch() {
     return true;
   });
 
-  if (search.mode === 'text') {
-    const items = list
-      .filter(r => !search.text || hasPhrase(simplePhrase(`${r.name} ${r.notes} ${r.category} ${r.ingredients.join(' ')}`), search.text))
-      .sort((a, b) => b.row - a.row)
-      .map(r => ({ r, match: null }));
-    // "tomato chicken cream" with spaces instead of commas: if no name matches
-    // the whole phrase, treat each word as something she has.
-    const words = search.text.split(' ');
-    if (items.length || words.length < 2) return { ...search, items };
-    search = { mode: 'ingredients', terms: [...new Set(words)] };
-  }
+  // One word or a dish name: look in names, notes, categories and ingredients.
+  // A list ("chicken, cream, cashew") or several words ("chicken cream
+  // cashew"): only dishes that have every one of them, in the name or ingredients.
+  // A phrase without commas ("curry leaves", "chicken gravy") is tried whole
+  // first; termMatches falls back to its separate words when that finds nothing.
+  const terms = search.mode === 'ingredients' ? search.terms : (search.text ? [search.text] : []);
+  const several = terms.length > 1;
   const items = list
-    .map(r => ({ r, match: ingredientMatch(r, search.terms) }))
-    .filter(x => x.match.have.length)
-    .sort((a, b) => b.match.have.length - a.match.have.length || b.r.row - a.r.row);
-  return { ...search, items };
+    .filter(r => {
+      const text = simplePhrase(several
+        ? [r.name, ...r.ingredients].join(' , ')
+        : `${r.name} ${r.notes} ${r.category} ${r.ingredients.join(' ')}`);
+      const name = simplePhrase(r.name);
+      return terms.every(t => termMatches(text, name, t));
+    })
+    .sort((a, b) => b.row - a.row)
+    .map(r => ({ r, match: null }));
+  return { mode: several ? 'ingredients' : 'text', terms, items };
 }
 
-/** The line under a recipe square for an ingredient search, e.g. "2 of 3 · no cream". */
-function matchLabel({ have, missing }) {
-  if (!missing.length) return have.length === 1 ? 'Has it' : have.length === 2 ? 'Has both' : `Has all ${have.length}`;
-  return `${have.length} of ${have.length + missing.length} · no ${missing.join(', ')}`;
+/** "chicken, cream and cashew" */
+function andList(items) {
+  return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
 }
 
 function renderRecipes() {
@@ -678,9 +708,6 @@ function renderRecipes() {
       ? '<button class="link-btn" data-action="hide-removed">Back to recipes</button>'
       : (removedCount ? `<button class="link-btn" data-action="show-removed">Show removed (${removedCount})</button>` : '')}
 
-    ${f.showRemoved ? '' : `<div class="footer-action">
-      <button class="link-btn sign-out" data-action="sign-out">Sign out${state.user ? ` (${esc(state.user)})` : ''}</button>
-    </div>`}
   `;
   renderList();
 }
@@ -691,20 +718,18 @@ function renderList() {
   const search = runSearch();
   const list = search.items;
   $('#count').textContent = `${list.length} recipe${list.length === 1 ? '' : 's'}` +
-    (search.mode === 'ingredients' && list.length ? ` using ${search.terms.join(', ')} · best matches first` : '');
+    (search.mode === 'ingredients' && list.length ? ` with ${andList(search.terms)}` : '');
   if (!list.length) {
     el.innerHTML = `<p class="muted empty">${state.recipes.length
-      ? (search.mode === 'ingredients' ? 'No recipes use any of those.' : 'No recipes match.')
+      ? (search.mode === 'ingredients' ? `No recipes have all of ${andList(search.terms)}.` : 'No recipes match.')
       : (state.loading ? 'Loading your recipes…' : 'No recipes yet.')}</p>`;
     return;
   }
   el.innerHTML = list.map(({ r, match }) => {
     const category = categoryOf(r);
-    const status = match ? matchLabel(match)
-      : (statusOf(r) === STATUS.toTry && !isRemoved(r) ? '' : statusLabel(r));
-    // For an ingredient search, "2 of 3" and "no cream" go on two lines so the missing part isn't cut off.
-    const statusHtml = match ? esc(status).replace(' · ', '<br>') : esc(status);
-    return `<a class="square tint-${tintFor(category)}${match ? ' matched' : ''}${match && !match.missing.length ? ' full-match' : ''}" href="#recipe/${r.row}">
+    const status = statusOf(r) === STATUS.toTry && !isRemoved(r) ? '' : statusLabel(r);
+    const statusHtml = esc(status);
+    return `<a class="square tint-${tintFor(category)}" href="#recipe/${r.row}">
       <span class="cat">${esc(category || 'No category')}</span>
       <span class="name${String(r.name).trim() ? '' : ' untitled'}">${esc(displayName(r))}</span>
       ${status ? `<span class="status">${statusHtml}</span>` : ''}
@@ -1086,9 +1111,13 @@ document.addEventListener('submit', async e => {
   // Close the keyboard; render() won't replace a screen while a field has focus.
   if (document.activeElement) document.activeElement.blur();
   // A link shared in before signing in is still waiting on the Add screen.
-  if (location.hash !== '#add') history.replaceState(null, '', location.pathname + '#today');
+  const sharing = location.hash === '#add';
+  if (!sharing) history.replaceState(null, '', location.pathname + '#today');
+  // Fetch her recipes while the button still says "Signing in…", then go
+  // straight into Yo Mom (it needs the recipes to deal its cards).
+  await loadRecipes();
   render();
-  loadRecipes();
+  if (!sharing) showWelcome();
 });
 
 async function saveRecipe(btn, r) {
@@ -1212,6 +1241,12 @@ async function checkSession() {
   } catch (e) { /* database library didn't load (offline): keep the saved list */ }
 }
 
+/** Plays Yo Mom: deals nine of her recipes and picks one at random. */
+function showWelcome() {
+  const tiles = welcomeTiles();
+  Welcome.show(tiles, Math.floor(Math.random() * tiles.length), usePick);
+}
+
 function start() {
   const shared = readShare();
   if (shared) {
@@ -1222,10 +1257,7 @@ function start() {
   } else {
     render();
     // "Yo Mom" each time she opens the app, but not when she's sharing a link in.
-    if (configured() && state.user) {
-      const tiles = welcomeTiles();
-      Welcome.show(tiles, Math.floor(Math.random() * tiles.length), usePick);
-    }
+    if (configured() && state.user) showWelcome();
   }
 
   if (configured()) checkSession();

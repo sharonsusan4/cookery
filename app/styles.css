@@ -229,11 +229,7 @@ body.welcome-open { overflow: hidden; }
 .search-row { display: flex; gap: 8px; }
 .search-row input { flex: 1; min-width: 0; }
 .search-row button { flex: none; }
-/* A recipe that uses everything she searched for */
-.square.full-match { box-shadow: 0 0 0 2px var(--accent); }
 .square .status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.square.matched .name { -webkit-line-clamp: 2; }
-.square.matched .status { white-space: normal; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 
 /* Ingredients on a recipe page */
 ul.ingredients { margin: 0 0 4px; padding-left: 22px; line-height: 1.7; }
