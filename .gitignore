@@ -1,5 +1,19 @@
-# Copies of Mom's recipes used for local testing. Never publish these.
+# Mom's recipes. The repo is public, so her data must never be committed.
+# import.sql is made by dev/make-import.py; the other two are left over from
+# the old Google Sheet test setup and can be deleted.
+dev/*.sql
 dev/fixture.json
 dev/test-sheet.json
+*.xlsx
+
+# Made by the Vercel command-line tool, if it's ever used.
+.vercel
+.env*
 
 .DS_Store
+
+# Ingredient lists for her recipes (her data): reviewed locally, never committed.
+dev/ingredients*
+
+# Temporary files from the Supabase command-line tool.
+supabase/.temp/

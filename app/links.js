@@ -1,5 +1,7 @@
-// Link helpers. sourceFor, youTubeId and linkKey are copies of the ones in
-// apps-script/Code.gs; keep them in sync.
+// Link helpers. youTubeId and linkKey are also ported to Python in
+// dev/make-import.py, which fills in link_key for her imported recipes. Keep
+// them in sync: if linkKey gives a different answer here than in the database,
+// repeats aren't spotted.
 
 function sourceFor(link) {
   var l = String(link).toLowerCase();

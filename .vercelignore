@@ -1,0 +1,8 @@
+# Only the app and its one function go to Vercel. dev/ holds local copies of
+# Mom's recipes (import.sql, fixture.json), which must never be uploaded.
+dev/
+supabase/
+.github/
+README.md
+*.sql
+*.xlsx

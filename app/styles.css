@@ -106,7 +106,7 @@ a { color: var(--accent); }
 
 label.field { display: block; font-size: 15px; color: var(--text-2); margin: 20px 0 6px; }
 
-input[type=text], input[type=url], input[type=search], textarea, select {
+input[type=text], input[type=url], input[type=search], input[type=email], input[type=password], textarea, select {
   font: inherit;
   width: 100%;
   min-height: 48px;
@@ -225,6 +225,20 @@ body.welcome-open { overflow: hidden; }
 .welcome-enter { min-height: 54px; font-size: 18px; }
 
 /* Recipe squares */
+/* Search box with its button */
+.search-row { display: flex; gap: 8px; }
+.search-row input { flex: 1; min-width: 0; }
+.search-row button { flex: none; }
+/* A recipe that uses everything she searched for */
+.square.full-match { box-shadow: 0 0 0 2px var(--accent); }
+.square .status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.square.matched .name { -webkit-line-clamp: 2; }
+.square.matched .status { white-space: normal; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+/* Ingredients on a recipe page */
+ul.ingredients { margin: 0 0 4px; padding-left: 22px; line-height: 1.7; }
+ul.ingredients li::marker { color: var(--accent); }
+
 .squares { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 4px; }
 .square {
   aspect-ratio: 1;
@@ -272,6 +286,7 @@ body.welcome-open { overflow: hidden; }
 .empty { padding: 24px 0; }
 
 .footer-action { margin-top: 28px; text-align: center; }
+.sign-out { color: var(--text-3); font-size: 14px; }
 
 /* ---- nav and toast ---- */
 
@@ -300,3 +315,5 @@ body.no-tabs .tabs { display: none; }
 }
 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+h2.section { font-size: 20px; margin: 24px 0 6px; }

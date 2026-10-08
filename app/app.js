@@ -2,7 +2,7 @@
 
 // ---------- constants ----------
 
-// Same order as the dropdown in her sheet, with meal times first.
+// Same order as the dropdown in her old sheet, with meal times first.
 const CATEGORIES = [
   'Breakfast', 'Lunch', 'Dinner', 'Main Course', 'Side Dish', 'Appetizer/Snack',
   'Sweet Snack/Mithai', 'Dessert', 'Bread/Baking', 'Soup', 'Salad',
@@ -35,8 +35,9 @@ const MEALS = {
 };
 
 // ---------- storage ----------
-// localStorage only holds conveniences (cached list, setup, last suggestions).
-// The sheet is the real copy, so losing any of this is harmless.
+// localStorage only holds conveniences (cached list, who's signed in, last
+// suggestions). The database is the real copy, so losing any of this is
+// harmless. supabase-js keeps its own sign-in in localStorage too.
 
 const store = {
   get(key, fallback) {
@@ -58,7 +59,10 @@ const store = {
 };
 
 const state = {
-  config: store.get('config', null),
+  // Email of whoever signed in on this phone. Remembered separately from
+  // supabase-js's own session so the app (and Yo Mom) can open straight away,
+  // even offline, before supabase-js has checked the session.
+  user: store.get('user', null),
   recipes: store.get('recipes', []),
   loadedAt: 0,
   loading: false,
@@ -70,46 +74,139 @@ const state = {
   draft: null,
 };
 
-// ---------- api ----------
+// ---------- database ----------
+// Recipes live in Supabase (supabase/schema.sql). Each recipe keeps its
+// database id in `row`: that used to be the sheet row number, and keeping the
+// name means the screens, the welcome tiles and #recipe/<row> links didn't
+// have to change. Ids never shift, unlike sheet rows.
 
-async function api(action, params = {}) {
-  if (!state.config) throw new Error('Not set up');
-  let res;
-  if (action === 'list' || action === 'meta') {
-    const qs = new URLSearchParams({ action, key: state.config.key, ...params });
-    res = await fetch(state.config.url + '?' + qs);
-  } else {
-    // Plain-text body keeps this a "simple" request that Apps Script accepts.
-    res = await fetch(state.config.url, {
-      method: 'POST',
-      body: JSON.stringify({ action, key: state.config.key, ...params }),
+const COLUMNS = 'id, name, category, status, link, source, notes, ingredients';
+const EDITABLE = ['name', 'category', 'status', 'notes', 'ingredients'];
+const PAGE = 1000; // Supabase sends at most 1000 rows per request.
+
+/** False until app/config.js has the real project URL and key. */
+function configured() {
+  return typeof SUPABASE_URL === 'string' && typeof SUPABASE_ANON_KEY === 'string' &&
+    /^https?:\/\/\S+$/.test(SUPABASE_URL) && !/YOUR-/.test(SUPABASE_URL + SUPABASE_ANON_KEY);
+}
+
+let client = null;
+function db() {
+  if (!client) {
+    // The library comes from a CDN; if it didn't load she's offline (and the
+    // service worker had no copy yet), so treat it like any other lost connection.
+    if (!window.supabase) throw new Error('Offline: couldn’t load the database library');
+    client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: {
+        persistSession: true, // sign in once; the session is kept and refreshed on this phone
+        autoRefreshToken: true,
+        detectSessionInUrl: false, // password sign-in only, so leave the #routes alone
+      },
+    });
+    // Fires if the session ends somewhere else (e.g. it was revoked in Supabase).
+    client.auth.onAuthStateChange(event => {
+      if (event === 'SIGNED_OUT') signedOut();
     });
   }
-  const data = await res.json();
-  if (!data.ok) throw new Error(data.error || 'Something went wrong');
+  return client;
+}
+
+/** A database row in the shape the screens use. */
+function fromDb(d) {
+  return {
+    row: d.id,
+    name: d.name ?? '',
+    category: d.category ?? '',
+    status: d.status ?? '',
+    link: d.link ?? '',
+    source: d.source ?? '',
+    notes: d.notes ?? '',
+    ingredients: Array.isArray(d.ingredients) ? d.ingredients : [],
+  };
+}
+
+/** Runs a supabase-js query and returns its data, throwing its error instead. */
+async function query(request) {
+  const { data, error } = await request;
+  if (error) throw error;
   return data;
 }
 
+function isNetworkError(e) {
+  return /fetch|network|load failed|offline/i.test(String((e && (e.message || e.name)) || ''));
+}
+
+/**
+ * Checks there's a signed-in session before touching recipes. Without one the
+ * database quietly returns no rows (that's how the rules hide them), which
+ * would look like an empty recipe list, so show the sign-in screen instead.
+ */
+async function requireSession() {
+  const { data, error } = await db().auth.getSession();
+  if (data.session) return data.session;
+  if (error && (error.name === 'AuthRetryableFetchError' || isNetworkError(error))) throw error;
+  signedOut();
+  throw new Error('Please sign in again.');
+}
+
+async function listRecipes() {
+  await requireSession();
+  const all = [];
+  for (let from = 0; ; from += PAGE) {
+    const page = await query(db().from('recipes').select(COLUMNS).order('id').range(from, from + PAGE - 1));
+    all.push(...page);
+    if (page.length < PAGE) return all.map(fromDb);
+  }
+}
+
+const clean = v => (v == null ? '' : String(v).trim());
+
+/**
+ * Saves a new recipe. Unless `force` is set, a recipe with the same link
+ * (by linkKey, so a different-looking link to the same video counts) is
+ * returned instead with duplicate: true, and nothing is saved.
+ */
+async function addRecipe(recipe, force) {
+  await requireSession();
+  const link = clean(recipe.link);
+  const key = linkKey(link);
+  if (!force) {
+    const same = await query(db().from('recipes').select(COLUMNS).eq('link_key', key).order('id').limit(1));
+    if (same.length) return { duplicate: true, recipe: fromDb(same[0]) };
+  }
+  const row = {
+    name: clean(recipe.name),
+    category: clean(recipe.category),
+    status: Object.values(STATUS).includes(recipe.status) ? recipe.status : STATUS.toTry,
+    link,
+    link_key: key,
+    source: sourceFor(link),
+    notes: clean(recipe.notes),
+  };
+  return { duplicate: false, recipe: fromDb(await query(db().from('recipes').insert(row).select(COLUMNS).single())) };
+}
+
 async function loadRecipes({ quiet = false } = {}) {
-  if (state.loading) return;
+  if (state.loading || !state.user) return;
   state.loading = true;
   try {
-    const data = await api('list');
-    state.recipes = data.recipes;
+    state.recipes = await listRecipes();
     state.loadedAt = Date.now();
     store.set('recipes', state.recipes);
     render();
   } catch (e) {
-    if (!quiet) toast(offlineMessage(e));
+    if (!quiet && state.user) toast(offlineMessage(e));
   } finally {
     state.loading = false;
   }
 }
 
 function offlineMessage(e) {
-  if (e && e.message === 'Not allowed') return 'This app isn’t connected to your sheet. Open the setup link again.';
-  if (e && e.message && e.message !== 'Failed to fetch') return e.message;
-  return 'Couldn’t reach your sheet. Check the internet and try again.';
+  if (isNetworkError(e)) return 'Couldn’t reach your recipes. Check the internet and try again.';
+  if (e && (e.code === '42501' || /row-level security|permission denied/i.test(e.message))) {
+    return 'This account isn’t allowed to change recipes.';
+  }
+  return (e && e.message) || 'Something went wrong. Try again.';
 }
 
 function replaceRecipe(updated) {
@@ -119,15 +216,82 @@ function replaceRecipe(updated) {
   store.set('recipes', state.recipes);
 }
 
+/** Changes some of name / category / status / notes on one recipe. */
 async function updateRecipe(recipe, fields) {
-  const data = await api('update', { row: recipe.row, link: recipe.link, fields });
-  replaceRecipe(data.recipe);
-  return data.recipe;
+  await requireSession();
+  const changes = {};
+  for (const f of EDITABLE) {
+    if (!(f in fields)) continue;
+    if (f === 'ingredients') {
+      // An empty list is saved as "no ingredients yet", so it can be filled in later.
+      const list = (fields[f] || []).map(clean).filter(Boolean);
+      changes[f] = list.length ? list : null;
+      continue;
+    }
+    const v = clean(fields[f]);
+    if (f === 'status' && !Object.values(STATUS).includes(v)) continue;
+    changes[f] = v;
+  }
+  if (!Object.keys(changes).length) return recipe;
+  const rows = await query(db().from('recipes').update(changes).eq('id', recipe.row).select(COLUMNS));
+  if (!rows.length) throw new Error('That recipe isn’t in your list any more.');
+  const updated = fromDb(rows[0]);
+  replaceRecipe(updated);
+  return updated;
+}
+
+// ---------- signing in ----------
+
+async function signIn(email, password) {
+  const { data, error } = await db().auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  // The password only proves who it is; allowed_users decides whether they get in.
+  let allowed = false;
+  try {
+    allowed = await query(db().rpc('is_allowed'));
+  } catch (e) {
+    await db().auth.signOut({ scope: 'local' }).catch(() => {});
+    throw e;
+  }
+  if (!allowed) {
+    await db().auth.signOut({ scope: 'local' }).catch(() => {});
+    throw new Error('not-allowed');
+  }
+  state.user = data.user.email;
+  store.set('user', state.user);
+}
+
+function signInMessage(e) {
+  if (e.message === 'not-allowed') return 'This email isn’t on the list of people who can use the app.';
+  if (e.code === 'invalid_credentials' || /invalid login/i.test(e.message)) return 'That email and password don’t match.';
+  if (e.code === 'email_not_confirmed') return 'This account isn’t confirmed yet.';
+  if (isNetworkError(e)) return 'Couldn’t reach the server. Check the internet and try again.';
+  return e.message || 'Couldn’t sign in. Try again.';
+}
+
+async function signOut() {
+  // "local" signs out this phone only, not her other devices.
+  try { await db().auth.signOut({ scope: 'local' }); } catch (e) { /* offline: forget it here anyway */ }
+  signedOut();
+}
+
+/** Forget everything about the signed-in person on this phone. Safe to call twice. */
+function signedOut() {
+  const was = state.user;
+  state.user = null;
+  state.recipes = [];
+  state.loadedAt = 0;
+  state.suggestion = null;
+  store.remove('user');
+  store.remove('recipes');
+  store.remove('cooking');
+  if (was) render();
 }
 
 // ---------- reading her data ----------
-// Her sheet is written by hand, so read it forgivingly ("To try", "Main course ")
-// without ever rewriting what she typed.
+// Her recipes came from a hand-typed sheet and were imported exactly as written,
+// so read them forgivingly ("To try", "Main course ") without ever rewriting
+// what she typed.
 
 function statusOf(r) {
   const k = String(r.status).toLowerCase().replace(/[^a-z]/g, '');
@@ -384,18 +548,97 @@ function tintFor(category) {
   return TINTS[category] || 'gray';
 }
 
-function filteredRecipes() {
+// ---------- ingredient search ----------
+// She types what she has ("tomato, chicken, cream") and the recipes using the
+// most of it come first. Words are compared in a simple form (lowercase,
+// singular) and common Malayalam / Hindi names map to the English ones used
+// in the ingredient lists, so "tomatoes", "thakkali" and "tomato" all match.
+
+const SAME_AS = {
+  thakkali: 'tomato', ulli: 'onion', savala: 'onion', vellulli: 'garlic', inji: 'ginger',
+  mulaku: 'chilli', chili: 'chilli', chilly: 'chilli', thenga: 'coconut', thengapaal: 'coconut milk',
+  kozhi: 'chicken', meen: 'fish', chemmeen: 'prawn', shrimp: 'prawn', mutta: 'egg',
+  kappa: 'tapioca', cassava: 'tapioca', kathirikka: 'brinjal', eggplant: 'brinjal', aubergine: 'brinjal', baingan: 'brinjal',
+  aloo: 'potato', gobi: 'cauliflower', palak: 'spinach', methi: 'fenugreek', matar: 'pea', mutter: 'pea',
+  maanga: 'mango', manga: 'mango', parippu: 'dal', lentil: 'dal', dahi: 'curd', yogurt: 'curd', yoghurt: 'curd',
+  besan: 'gram flour', suji: 'rava', sooji: 'rava', semolina: 'rava', nendran: 'plantain', ethakka: 'plantain',
+  cilantro: 'coriander', dhaniya: 'coriander', pudina: 'mint', 'bell pepper': 'capsicum',
+};
+
+/** A word in its simple form: lowercase, singular, local name mapped to English. */
+function simpleWord(w) {
+  w = w.toLowerCase();
+  if (SAME_AS[w]) return SAME_AS[w];
+  if (w.length > 4 && w.endsWith('oes')) w = w.slice(0, -2); // tomatoes, potatoes
+  else if (w.length > 4 && w.endsWith('ies')) w = w.slice(0, -2); // chillies
+  else if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss')) w = w.slice(0, -1); // onions, prawns
+  return SAME_AS[w] || w;
+}
+
+/** Words of a phrase in their simple form, e.g. "Green Chillies" -> "green chilli". */
+function simplePhrase(text) {
+  return String(text).split(/[^\p{L}\p{N}]+/u).filter(Boolean).map(simpleWord).join(' ');
+}
+
+/** True when every word of `term` appears as whole words in `text`. */
+function hasPhrase(text, term) {
+  return (' ' + text + ' ').includes(' ' + term + ' ');
+}
+
+/**
+ * Reads the search box. A list ("tomato, chicken, cream", or "tomato and
+ * chicken") is an ingredient search; a single word or a name is a normal search.
+ */
+function readSearch(q) {
+  const parts = q.split(/,|\band\b|&|\+/i).map(simplePhrase).filter(Boolean);
+  if (parts.length > 1) return { mode: 'ingredients', terms: [...new Set(parts)] };
+  return { mode: 'text', text: parts[0] || '' };
+}
+
+/** Which of her search terms a recipe uses (from its ingredients or its name). */
+function ingredientMatch(r, terms) {
+  const haystack = simplePhrase([...r.ingredients, r.name].join(' , '));
+  const have = [], missing = [];
+  for (const t of terms) (hasPhrase(haystack, t) ? have : missing).push(t);
+  return { have, missing };
+}
+
+/**
+ * The recipes to show for the current filters and search box, with how well
+ * each matches when it's an ingredient search: { mode, terms, items: [{ r, match }] }.
+ */
+function runSearch() {
   const f = state.filters;
-  const q = f.q.trim().toLowerCase();
-  return state.recipes
-    .filter(r => {
-      if (f.showRemoved !== isRemoved(r)) return false;
-      if (!f.showRemoved && f.status !== 'all' && statusOf(r) !== f.status) return false;
-      if (f.category && categoryOf(r) !== f.category) return false;
-      if (q && !`${r.name} ${r.notes} ${r.category}`.toLowerCase().includes(q)) return false;
-      return true;
-    })
-    .sort((a, b) => b.row - a.row);
+  let search = readSearch(f.q.trim());
+  const list = state.recipes.filter(r => {
+    if (f.showRemoved !== isRemoved(r)) return false;
+    if (!f.showRemoved && f.status !== 'all' && statusOf(r) !== f.status) return false;
+    if (f.category && categoryOf(r) !== f.category) return false;
+    return true;
+  });
+
+  if (search.mode === 'text') {
+    const items = list
+      .filter(r => !search.text || hasPhrase(simplePhrase(`${r.name} ${r.notes} ${r.category} ${r.ingredients.join(' ')}`), search.text))
+      .sort((a, b) => b.row - a.row)
+      .map(r => ({ r, match: null }));
+    // "tomato chicken cream" with spaces instead of commas: if no name matches
+    // the whole phrase, treat each word as something she has.
+    const words = search.text.split(' ');
+    if (items.length || words.length < 2) return { ...search, items };
+    search = { mode: 'ingredients', terms: [...new Set(words)] };
+  }
+  const items = list
+    .map(r => ({ r, match: ingredientMatch(r, search.terms) }))
+    .filter(x => x.match.have.length)
+    .sort((a, b) => b.match.have.length - a.match.have.length || b.r.row - a.r.row);
+  return { ...search, items };
+}
+
+/** The line under a recipe square for an ingredient search, e.g. "2 of 3 · no cream". */
+function matchLabel({ have, missing }) {
+  if (!missing.length) return have.length === 1 ? 'Has it' : have.length === 2 ? 'Has both' : `Has all ${have.length}`;
+  return `${have.length} of ${have.length + missing.length} · no ${missing.join(', ')}`;
 }
 
 function renderRecipes() {
@@ -407,10 +650,13 @@ function renderRecipes() {
 
   view().innerHTML = `
     <h1>${f.showRemoved ? 'Removed' : 'Recipes'}</h1>
-    <p class="muted">${f.showRemoved ? 'Recipes you removed. They’re still in your sheet.' : 'Everything in your recipe sheet.'}</p>
+    <p class="muted">${f.showRemoved ? 'Recipes you removed. They’re still saved.' : 'All the recipes you’ve saved.'}</p>
 
-    <label class="sr-only" for="search">Search</label>
-    <input id="search" type="search" placeholder="Search names and notes" value="${esc(f.q)}" autocomplete="off">
+    <form class="search-row" data-search-form>
+      <label class="sr-only" for="search">Search</label>
+      <input id="search" type="search" enterkeyhint="search" placeholder="Search, or list what you have: tomato, chicken" value="${esc(f.q)}" autocomplete="off">
+      <button class="primary" type="submit">Search</button>
+    </form>
     ${f.showRemoved ? '' : `
     <div class="row" style="margin-top:10px">
       <label class="sr-only" for="f-status">Status</label>
@@ -431,6 +677,10 @@ function renderRecipes() {
     ${f.showRemoved
       ? '<button class="link-btn" data-action="hide-removed">Back to recipes</button>'
       : (removedCount ? `<button class="link-btn" data-action="show-removed">Show removed (${removedCount})</button>` : '')}
+
+    ${f.showRemoved ? '' : `<div class="footer-action">
+      <button class="link-btn sign-out" data-action="sign-out">Sign out${state.user ? ` (${esc(state.user)})` : ''}</button>
+    </div>`}
   `;
   renderList();
 }
@@ -438,19 +688,26 @@ function renderRecipes() {
 function renderList() {
   const el = $('#list');
   if (!el) return;
-  const list = filteredRecipes();
-  $('#count').textContent = `${list.length} recipe${list.length === 1 ? '' : 's'}`;
+  const search = runSearch();
+  const list = search.items;
+  $('#count').textContent = `${list.length} recipe${list.length === 1 ? '' : 's'}` +
+    (search.mode === 'ingredients' && list.length ? ` using ${search.terms.join(', ')} · best matches first` : '');
   if (!list.length) {
-    el.innerHTML = `<p class="muted empty">${state.recipes.length ? 'No recipes match.' : (state.loading ? 'Loading your recipes…' : 'No recipes yet.')}</p>`;
+    el.innerHTML = `<p class="muted empty">${state.recipes.length
+      ? (search.mode === 'ingredients' ? 'No recipes use any of those.' : 'No recipes match.')
+      : (state.loading ? 'Loading your recipes…' : 'No recipes yet.')}</p>`;
     return;
   }
-  el.innerHTML = list.map(r => {
+  el.innerHTML = list.map(({ r, match }) => {
     const category = categoryOf(r);
-    const status = statusOf(r) === STATUS.toTry && !isRemoved(r) ? '' : statusLabel(r);
-    return `<a class="square tint-${tintFor(category)}" href="#recipe/${r.row}">
+    const status = match ? matchLabel(match)
+      : (statusOf(r) === STATUS.toTry && !isRemoved(r) ? '' : statusLabel(r));
+    // For an ingredient search, "2 of 3" and "no cream" go on two lines so the missing part isn't cut off.
+    const statusHtml = match ? esc(status).replace(' · ', '<br>') : esc(status);
+    return `<a class="square tint-${tintFor(category)}${match ? ' matched' : ''}${match && !match.missing.length ? ' full-match' : ''}" href="#recipe/${r.row}">
       <span class="cat">${esc(category || 'No category')}</span>
       <span class="name${String(r.name).trim() ? '' : ' untitled'}">${esc(displayName(r))}</span>
-      ${status ? `<span class="status">${esc(status)}</span>` : ''}
+      ${status ? `<span class="status">${statusHtml}</span>` : ''}
     </a>`;
   }).join('');
 }
@@ -461,7 +718,7 @@ function renderRecipe(row) {
   const r = findRecipe(row);
   if (!r) {
     view().innerHTML = `<h1>Not found</h1>
-      <p class="muted">${state.loading ? 'Loading…' : 'That recipe isn’t in your sheet any more.'}</p>
+      <p class="muted">${state.loading ? 'Loading…' : 'That recipe isn’t in your list any more.'}</p>
       <a class="btn block" href="#recipes">Back to recipes</a>`;
     return;
   }
@@ -475,6 +732,16 @@ function renderRecipe(row) {
 
     <button class="primary block" data-action="cook" data-row="${r.row}">Cook this</button>
     <a class="btn block" style="margin-top:8px" href="${esc(r.link)}" target="_blank" rel="noopener">${esc(openLabel(r))}</a>
+
+    <h2 class="section">Ingredients</h2>
+    ${r.ingredients.length
+      ? `<ul class="ingredients">${r.ingredients.map(x => `<li>${esc(x)}</li>`).join('')}</ul>`
+      : '<p class="muted">No ingredients yet.</p>'}
+    <button class="link-btn" data-action="edit-ingredients">${r.ingredients.length ? 'Edit ingredients' : 'Add ingredients'}</button>
+    <div id="r-ingredients-box" hidden>
+      <label class="field" for="r-ingredients">Ingredients, one per line</label>
+      <textarea id="r-ingredients" placeholder="tomato&#10;chicken&#10;cream">${esc(r.ingredients.join('\n'))}</textarea>
+    </div>
 
     <label class="field" for="r-name">Name</label>
     <input id="r-name" type="text" value="${esc(r.name)}" placeholder="Kappa biryani">
@@ -512,6 +779,9 @@ function recipeChanges(r) {
   const now = { name: String(r.name).trim(), status: statusOf(r), category: categoryOf(r), notes: String(r.notes).trim() };
   const changed = {};
   for (const k of Object.keys(fields)) if (fields[k] !== now[k]) changed[k] = fields[k];
+  // Ingredients: one per line (commas work too).
+  const list = $('#r-ingredients').value.split(/\n|,/).map(x => x.trim()).filter(Boolean);
+  if (list.join('\n') !== r.ingredients.join('\n')) changed.ingredients = list;
   return changed;
 }
 
@@ -566,14 +836,16 @@ async function setDraftLink(raw) {
   d.force = false;
   d.error = '';
   d.title = '';
-  renderAdd();
+  // A link shared in while signed out waits behind the sign-in screen.
+  const show = () => { if (state.user && location.hash === '#add') renderAdd(); };
+  show();
   if (!youTubeId(link)) return;
   try {
-    const meta = await api('meta', { url: link });
+    const meta = await fetchTitle(link);
     if (state.draft !== d || d.link !== link) return;
     d.title = meta.title || '';
     if (!d.name.trim()) d.name = nameFromTitle(d.title);
-    if (location.hash === '#add') renderAdd();
+    show();
   } catch (e) { /* no title is fine */ }
 }
 
@@ -589,14 +861,14 @@ async function saveNew(btn) {
   btn.disabled = true;
   btn.textContent = 'Saving…';
   try {
-    const data = await api('add', {
-      force: d.force,
-      recipe: { link: d.link, name: d.name, category: d.category, status: d.status, notes: d.notes },
-    });
+    const data = await addRecipe(
+      { link: d.link, name: d.name, category: d.category, status: d.status, notes: d.notes },
+      d.force,
+    );
     replaceRecipe(data.recipe);
     if (data.duplicate) return renderAdd();
     state.draft = null;
-    toast('Saved to your sheet');
+    toast('Saved');
     location.hash = `#recipe/${data.recipe.row}`;
   } catch (e) {
     toast(offlineMessage(e));
@@ -605,34 +877,36 @@ async function saveNew(btn) {
   }
 }
 
-// ---------- views: setup ----------
+/** YouTube title for a link, via api/meta.js (YouTube doesn't let the browser ask directly). */
+async function fetchTitle(link) {
+  const res = await fetch('/api/meta?id=' + encodeURIComponent(youTubeId(link)));
+  if (!res.ok) throw new Error('No title');
+  return res.json();
+}
 
-function renderSetup() {
+// ---------- views: sign in ----------
+
+function renderSignIn() {
   view().innerHTML = `
-    <h1>Connect your recipe sheet</h1>
-    <p class="muted">Open the setup link once on this phone and the app will remember it. Or paste the details below.</p>
-    <label class="field" for="s-url">Web app URL</label>
-    <input id="s-url" type="url" placeholder="https://script.google.com/macros/s/…/exec">
-    <label class="field" for="s-key">App key</label>
-    <input id="s-key" type="text" autocomplete="off">
-    <p class="error" id="s-error" hidden></p>
-    <button class="primary block" style="margin-top:20px" data-action="setup">Connect</button>
+    <h1>Sign in</h1>
+    <p class="muted">Sign in once and this phone will remember you.</p>
+    <form id="sign-in" novalidate>
+      <label class="field" for="s-email">Email</label>
+      <input id="s-email" type="email" inputmode="email" autocomplete="username" autocapitalize="off" spellcheck="false">
+      <label class="field" for="s-password">Password</label>
+      <input id="s-password" type="password" autocomplete="current-password">
+      <p class="error" id="s-error" hidden></p>
+      <button class="primary block" style="margin-top:20px" type="submit">Sign in</button>
+    </form>
   `;
 }
 
-async function connect(url, key) {
-  const before = state.config;
-  state.config = { url, key };
-  try {
-    const data = await api('list');
-    state.recipes = data.recipes;
-    state.loadedAt = Date.now();
-    store.set('recipes', state.recipes);
-    store.set('config', state.config);
-  } catch (e) {
-    state.config = before;
-    throw e;
-  }
+/** Shown until app/config.js is filled in, so a fresh deploy says what's missing. */
+function renderNotConfigured() {
+  view().innerHTML = `
+    <h1>Almost ready</h1>
+    <p class="muted">The app doesn’t know where the recipes are kept yet. Put the Supabase project URL and anon key into <b>app/config.js</b> (the README says where to find them), then deploy again.</p>
+  `;
 }
 
 // ---------- router ----------
@@ -645,9 +919,11 @@ function render() {
     else a.removeAttribute('aria-current');
   });
 
-  if (!state.config) {
+  if (!configured() || !state.user) {
     document.body.classList.add('no-tabs');
-    return renderSetup();
+    if (!configured()) return renderNotConfigured();
+    // Leave the form alone if it's already up, so nothing she's typed is lost.
+    return $('#sign-in') ? undefined : renderSignIn();
   }
   document.body.classList.remove('no-tabs');
 
@@ -664,8 +940,7 @@ function render() {
   return renderToday();
 }
 
-window.addEventListener('hashchange', async () => {
-  if (await useSetupLink()) return;
+window.addEventListener('hashchange', () => {
   render();
   window.scrollTo(0, 0);
 });
@@ -681,7 +956,7 @@ document.addEventListener('input', e => {
     state.draft.name = e.target.value;
   } else if (id === 'a-notes') {
     state.draft.notes = e.target.value;
-  } else if (id === 'r-name' || id === 'r-notes') {
+  } else if (id === 'r-name' || id === 'r-notes' || id === 'r-ingredients') {
     showRecipeSave();
   }
 });
@@ -754,8 +1029,14 @@ document.addEventListener('click', async e => {
     if (ds.action === 'back') return history.length > 1 ? history.back() : (location.hash = '#recipes');
     if (!r) return;
     if (ds.action === 'save-recipe') return saveRecipe(el, r);
+    if (ds.action === 'edit-ingredients') {
+      el.hidden = true;
+      $('#r-ingredients-box').hidden = false;
+      $('#r-ingredients').focus();
+      return;
+    }
     if (ds.action === 'remove') {
-      if (!confirm(`Remove “${displayName(r)}” from your recipes? It stays in your sheet as “Not Interested”.`)) return;
+      if (!confirm(`Remove “${displayName(r)}” from your recipes? You can put it back from “Show removed”.`)) return;
       return saveFields(r, { status: STATUS.removed }, 'Removed', '#recipes');
     }
     if (ds.action === 'restore') return saveFields(r, { status: STATUS.toTry }, 'Back in your recipes');
@@ -767,23 +1048,47 @@ document.addEventListener('click', async e => {
     if (ds.action === 'save-new') return saveNew(el);
   }
 
-  // Setup
-  if (ds.action === 'setup') {
-    const url = $('#s-url').value.trim();
-    const key = $('#s-key').value.trim();
-    const err = $('#s-error');
-    if (!url || !key) { err.textContent = 'Fill in both fields.'; err.hidden = false; return; }
-    el.disabled = true;
-    try {
-      await connect(url, key);
-      location.hash = '#today';
-      render();
-    } catch (ex) {
-      err.textContent = 'Couldn’t connect. Check the URL and key.';
-      err.hidden = false;
-      el.disabled = false;
-    }
+  if (ds.action === 'sign-out') {
+    if (!confirm('Sign out of the recipe app on this phone?')) return;
+    return signOut();
   }
+});
+
+document.addEventListener('submit', async e => {
+  if (e.target.matches('[data-search-form]')) {
+    // The list already updates as she types; Search just closes the keyboard.
+    e.preventDefault();
+    state.filters.q = $('#search').value;
+    $('#search').blur();
+    renderList();
+    return;
+  }
+  if (e.target.id !== 'sign-in') return;
+  e.preventDefault();
+  const email = $('#s-email').value.trim();
+  const password = $('#s-password').value;
+  const err = $('#s-error');
+  const btn = e.target.querySelector('button');
+  const fail = message => {
+    err.textContent = message;
+    err.hidden = false;
+    btn.disabled = false;
+    btn.textContent = 'Sign in';
+  };
+  if (!email || !password) return fail('Fill in both fields.');
+  btn.disabled = true;
+  btn.textContent = 'Signing in…';
+  try {
+    await signIn(email, password);
+  } catch (ex) {
+    return fail(signInMessage(ex));
+  }
+  // Close the keyboard; render() won't replace a screen while a field has focus.
+  if (document.activeElement) document.activeElement.blur();
+  // A link shared in before signing in is still waiting on the Add screen.
+  if (location.hash !== '#add') history.replaceState(null, '', location.pathname + '#today');
+  render();
+  loadRecipes();
 });
 
 async function saveRecipe(btn, r) {
@@ -878,27 +1183,6 @@ function usePick(tile) {
   else render();
 }
 
-function readSetupLink() {
-  // Setup link: …/#setup=<web app url>&key=<key>. Kept in the # part so it never reaches a server.
-  if (!location.hash.startsWith('#setup=')) return null;
-  const p = new URLSearchParams(location.hash.slice(1));
-  return { url: p.get('setup'), key: p.get('key') };
-}
-
-async function useSetupLink() {
-  const setup = readSetupLink();
-  if (!setup || !setup.url || !setup.key) return false;
-  history.replaceState(null, '', location.pathname + '#today');
-  try {
-    await connect(setup.url, setup.key);
-    toast('Connected to your recipe sheet');
-  } catch (e) {
-    toast('Couldn’t connect with that setup link.');
-  }
-  render();
-  return true;
-}
-
 function readShare() {
   // Android share sheet opens …/?title=…&text=…&url=…
   const p = new URLSearchParams(location.search);
@@ -907,9 +1191,28 @@ function readShare() {
   return findLink(p.get('url'), p.get('text'), p.get('title'));
 }
 
-async function start() {
-  await useSetupLink();
+/**
+ * Confirms the sign-in this phone remembers, in the background so the app
+ * opens instantly, then fetches fresh recipes.
+ */
+async function checkSession() {
+  try {
+    const { data, error } = await db().auth.getSession();
+    if (data.session) {
+      if (state.user !== data.session.user.email) {
+        state.user = data.session.user.email;
+        store.set('user', state.user);
+        render();
+      }
+      loadRecipes({ quiet: state.recipes.length > 0 });
+    } else if (!error) {
+      signedOut();
+    }
+    // With an error she's most likely offline: keep showing the saved list.
+  } catch (e) { /* database library didn't load (offline): keep the saved list */ }
+}
 
+function start() {
   const shared = readShare();
   if (shared) {
     state.draft = newDraft();
@@ -919,19 +1222,19 @@ async function start() {
   } else {
     render();
     // "Yo Mom" each time she opens the app, but not when she's sharing a link in.
-    if (state.config) {
+    if (configured() && state.user) {
       const tiles = welcomeTiles();
       Welcome.show(tiles, Math.floor(Math.random() * tiles.length), usePick);
     }
   }
 
-  if (state.config && !state.loadedAt) loadRecipes({ quiet: state.recipes.length > 0 });
+  if (configured()) checkSession();
 }
 
-// Refresh when she comes back to the app (e.g. after editing the sheet).
+// Refresh when she comes back to the app (e.g. after adding a recipe on another device).
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && state.config && Date.now() - state.loadedAt > 60000) {
-    loadRecipes({ quiet: true });
+  if (document.visibilityState === 'visible' && configured() && Date.now() - state.loadedAt > 60000) {
+    checkSession();
   }
 });
 
