@@ -2,6 +2,8 @@
 # import.sql is made by dev/make-import.py; the other two are left over from
 # the old Google Sheet test setup and can be deleted.
 dev/*.sql
+# ...except the guest-rules check, which holds no data of hers.
+!dev/guest-rls-test.sql
 dev/fixture.json
 dev/test-sheet.json
 *.xlsx
@@ -17,3 +19,13 @@ dev/ingredients*
 
 # Temporary files from the Supabase command-line tool.
 supabase/.temp/
+
+# Screenshots of the app made while testing, to show around; not part of the app.
+dev/preview-*.png
+dev/photos/
+
+# Database backups made before a migration (dev/GUEST-ROLLOUT.md): her data.
+dev/backup/
+dev/concepts/
+dev/redesign-wip/
+dev/live/

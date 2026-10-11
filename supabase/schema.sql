@@ -1,6 +1,14 @@
 -- Database for the recipe app. Paste all of this into Supabase > SQL Editor and
 -- click Run, once, on a new project. It holds no recipes (those come from
 -- dev/import.sql, which is never committed), so this file is safe to publish.
+--
+-- A project set up before "Last made", the shopping list and photos only needs
+-- supabase/migrations/002_last_made_shopping_photos.sql, one set up before
+-- "Quick & easy" / "Gourmet" needs 003_effort.sql, one set up before the meal
+-- plan needs 004_meal_plan.sql, one set up before guest mode needs
+-- 005_guests.sql, one set up before "Shows in" needs 006_meals.sql, and one
+-- set up before a dish could be planned twice needs 007_plan_repeats.sql; this
+-- file already includes everything in all of them. Needs Postgres 15 or newer.
 
 -- ---------- recipes ----------
 
@@ -19,20 +27,42 @@ create table public.recipes (
   link     text not null,
   -- The link in a comparable form ("yt:<video id>", "ig:<post id>", ...),
   -- worked out by linkKey() in app/links.js, used to spot the same video saved
-  -- twice. Not unique: her sheet already has a few repeats.
+  -- twice. Not unique: her sheet already has a few repeats, and a guest may
+  -- save a video Mom already has.
   link_key text not null default '',
   source   text not null default '',
   notes    text not null default '',
 
-  -- For features that are on the way; nothing uses them yet.
+  -- protein isn't used yet. ingredients drive the ingredient search, the
+  -- chips under it, and tapping onto the shopping list.
   protein     text,
   ingredients text[],
+
+  -- When she last cooked it (set by "How was it?" and "I made this today");
+  -- null means never, as far as the app knows.
+  last_cooked_at timestamptz,
+  -- Her own photo of the dish: a path inside the private dish-photos bucket.
+  photo_path text,
+  -- 'quick' (quick and/or easy), 'gourmet' (special, for guests or
+  -- festivals), 'storage' (preserving and prep ideas, never suggested as a
+  -- meal), or null for an everyday dish. Plain text with no CHECK, so a label
+  -- can be added later without a migration.
+  effort text,
+  -- The meals it shows in (names from MEALS in app/app.js: Breakfast, Lunch,
+  -- Snacks, Dinner, Desserts, Drinks), or null for "the meals its category
+  -- belongs to". Main dish or "On the side" still follows the category.
+  meals text[],
+
+  -- Null: Mom's (the family's) recipe. Otherwise the guest who added it (see
+  -- "guests" below). The app shows allowed users only owner is null.
+  owner uuid references auth.users (id) on delete cascade,
 
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
 create index recipes_link_key_idx on public.recipes (link_key);
+create index recipes_owner_idx on public.recipes (owner);
 
 create function public.set_updated_at() returns trigger
 language plpgsql
@@ -47,6 +77,25 @@ $$;
 create trigger recipes_set_updated_at
   before update on public.recipes
   for each row execute function public.set_updated_at();
+
+-- Family recipes (owner is null) are never deleted by anyone signed in
+-- through the app, whatever the rules below say. The SQL Editor and Table
+-- Editor still can.
+create function public.keep_family_recipes() returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if old.owner is null and current_user in ('anon', 'authenticated') then
+    raise exception 'Family recipes are never deleted' using errcode = '42501';
+  end if;
+  return old;
+end;
+$$;
+
+create trigger recipes_keep_family
+  before delete on public.recipes
+  for each row execute function public.keep_family_recipes();
 
 -- ---------- who may use the app ----------
 
@@ -78,10 +127,235 @@ $$;
 revoke execute on function public.is_allowed() from public, anon;
 grant execute on function public.is_allowed() to authenticated;
 
+-- ---------- guests (family members who came in through the family link) ----------
+-- They are Supabase anonymous users: no email, no password. Opening
+-- …/#join=<code> and typing a name calls join_family(); with the right code
+-- they get a row in public.guests. Guests read Mom's recipes and keep their
+-- own recipes, plan and list; they never change hers. An anonymous user
+-- without a row in guests sees nothing.
+
+-- A schema the API doesn't expose, for the code.
+create schema private;
+revoke all on schema private from public;
+revoke all on schema private from anon, authenticated;
+
+-- The one current code. "Make a new link" replaces it.
+create table private.family_code (
+  id boolean primary key default true check (id),
+  code text not null,
+  created_at timestamptz not null default now()
+);
+
+-- Wrong codes, so one anonymous session can't simply try codes forever.
+create table private.join_failures (
+  user_id uuid not null,
+  at timestamptz not null default now()
+);
+create index join_failures_user_id_at_idx on private.join_failures (user_id, at);
+
+alter table private.family_code enable row level security;
+alter table private.join_failures enable row level security;
+revoke all on all tables in schema private from public, anon, authenticated;
+
+-- 12 characters from 31 that can't be mixed up (no i, l, o, 0 or 1), from
+-- the server's strong random source (gen_random_uuid), skipping the uuid's
+-- fixed bits and bytes 248-255 so every character is equally likely.
+create function private.make_family_code() returns text
+language plpgsql
+volatile
+set search_path = ''
+as $$
+declare
+  alphabet constant text := 'abcdefghjkmnpqrstuvwxyz23456789';
+  result text := '';
+  bytes bytea;
+  b int;
+begin
+  while length(result) < 12 loop
+    bytes := uuid_send(gen_random_uuid());
+    for i in 0..15 loop
+      continue when i in (6, 8);
+      b := get_byte(bytes, i);
+      continue when b >= 248;
+      result := result || substr(alphabet, (b % 31) + 1, 1);
+      exit when length(result) >= 12;
+    end loop;
+  end loop;
+  return result;
+end;
+$$;
+
+revoke execute on function private.make_family_code() from public, anon, authenticated;
+
+insert into private.family_code (id, code) values (true, private.make_family_code());
+
+-- One row per guest. Deleting their anonymous user (Authentication > Users)
+-- removes the row and everything they added.
+create table public.guests (
+  user_id uuid primary key references auth.users (id) on delete cascade,
+  name text not null,
+  first_seen timestamptz not null default now(),
+  last_seen timestamptz not null default now()
+);
+
+-- Only Mom and Sharon read it (the Visitors page); the functions below write it.
+alter table public.guests enable row level security;
+revoke all on public.guests from anon, authenticated;
+grant select on public.guests to authenticated;
+
+create policy "Allowed users can see guests"
+  on public.guests for select to authenticated
+  using ((select public.is_allowed()));
+
+-- True when the signed-in person is a guest (joined, and not removed).
+create function public.is_guest() returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select exists (
+    select 1 from public.guests g
+    where g.user_id = (select auth.uid())
+  );
+$$;
+
+revoke execute on function public.is_guest() from public, anon;
+grant execute on function public.is_guest() to authenticated;
+
+-- Right after signInAnonymously(): true when the code is the current one,
+-- and the caller is then a guest under `name` (trimmed, at most 40
+-- characters). False for a wrong code, no sign-in, an empty name, an allowed
+-- user, or after 10 wrong codes in 15 minutes.
+create function public.join_family(code text, name text) returns boolean
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+#variable_conflict use_column
+declare
+  uid uuid := auth.uid();
+  current_code text;
+  clean_name text;
+begin
+  if uid is null or public.is_allowed() then
+    return false;
+  end if;
+
+  if (select count(*) from private.join_failures f
+      where f.user_id = uid and f.at > now() - interval '15 minutes') >= 10 then
+    return false;
+  end if;
+
+  select fc.code into current_code from private.family_code fc where fc.id;
+
+  -- Compared as hashes, so how long the comparison takes says nothing about the code.
+  if current_code is null or
+     sha256(convert_to(lower(trim(coalesce(join_family.code, ''))), 'UTF8')) <>
+     sha256(convert_to(current_code, 'UTF8')) then
+    insert into private.join_failures (user_id) values (uid);
+    delete from private.join_failures f where f.at < now() - interval '1 day';
+    return false;
+  end if;
+
+  clean_name := trim(left(trim(regexp_replace(coalesce(join_family.name, ''), '[[:space:][:cntrl:]]+', ' ', 'g')), 40));
+  if clean_name = '' then
+    return false;
+  end if;
+
+  insert into public.guests as g (user_id, name)
+  values (uid, clean_name)
+  on conflict (user_id) do update set name = excluded.name, last_seen = now();
+  return true;
+end;
+$$;
+
+revoke execute on function public.join_family(text, text) from public, anon;
+grant execute on function public.join_family(text, text) to authenticated;
+
+-- Once each time a guest opens the app. Returns their name, or null when
+-- they aren't (or are no longer) a guest.
+create function public.touch_guest() returns text
+language sql
+volatile
+security definer
+set search_path = ''
+as $$
+  update public.guests g
+  set last_seen = now()
+  where g.user_id = (select auth.uid())
+  returning g.name;
+$$;
+
+revoke execute on function public.touch_guest() from public, anon;
+grant execute on function public.touch_guest() to authenticated;
+
+-- Allowed users only: a new family code, replacing the old one.
+create function public.new_family_code() returns text
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  fresh text;
+begin
+  if not public.is_allowed() then
+    raise exception 'Only allowed users can make a family link' using errcode = '42501';
+  end if;
+  fresh := private.make_family_code();
+  insert into private.family_code (id, code, created_at)
+  values (true, fresh, now())
+  on conflict (id) do update set code = excluded.code, created_at = excluded.created_at;
+  return fresh;
+end;
+$$;
+
+revoke execute on function public.new_family_code() from public, anon;
+grant execute on function public.new_family_code() to authenticated;
+
+-- Allowed users only: the current code, for the Visitors page.
+create function public.get_family_code() returns text
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+begin
+  if not public.is_allowed() then
+    raise exception 'Only allowed users can see the family link' using errcode = '42501';
+  end if;
+  return (select fc.code from private.family_code fc where fc.id);
+end;
+$$;
+
+revoke execute on function public.get_family_code() from public, anon;
+grant execute on function public.get_family_code() to authenticated;
+
+-- Allowed users only: takes a guest out. Their rows stay, hidden.
+create function public.remove_guest(guest uuid) returns boolean
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+begin
+  if not public.is_allowed() then
+    raise exception 'Only allowed users can remove a guest' using errcode = '42501';
+  end if;
+  delete from public.guests g where g.user_id = remove_guest.guest;
+  return found;
+end;
+$$;
+
+revoke execute on function public.remove_guest(uuid) from public, anon;
+grant execute on function public.remove_guest(uuid) to authenticated;
+
 -- ---------- Row Level Security ----------
 -- The app's key is public (it sits in app/config.js), so these rules are what
 -- actually keep her recipes private: only a signed-in person on the list can
--- see, add or change them.
+-- see, add or change them, and a guest can only see them and keep their own.
 
 alter table public.recipes enable row level security;
 
@@ -98,14 +372,174 @@ create policy "Allowed users can change recipes"
   using ((select public.is_allowed()))
   with check ((select public.is_allowed()));
 
--- No delete rule, so nothing can be deleted through the app: "Remove" only
--- sets the status to Not Interested. Removing the permission as well makes
--- that doubly sure.
-revoke delete, truncate on public.recipes from anon, authenticated;
-grant select, insert, update on public.recipes to authenticated;
+-- Guests: Mom's recipes and their own to read; only their own to add, change
+-- or delete.
+create policy "Guests can read family and own recipes"
+  on public.recipes for select to authenticated
+  using ((owner is null or owner = (select auth.uid())) and (select public.is_guest()));
+
+create policy "Guests can add their own recipes"
+  on public.recipes for insert to authenticated
+  with check (owner = (select auth.uid()) and (select public.is_guest()));
+
+create policy "Guests can change their own recipes"
+  on public.recipes for update to authenticated
+  using (owner = (select auth.uid()) and (select public.is_guest()))
+  with check (owner = (select auth.uid()) and (select public.is_guest()));
+
+create policy "Guests can delete their own recipes"
+  on public.recipes for delete to authenticated
+  using (owner = (select auth.uid()) and (select public.is_guest()));
+
+-- No delete rule for allowed users, so nothing of Mom's can be deleted
+-- through the app: "Remove" only sets the status to Not Interested. Delete is
+-- granted only so guests can delete their own; the keep_family_recipes
+-- trigger above makes doubly sure no family recipe goes.
+revoke truncate on public.recipes from anon, authenticated;
+grant select, insert, update, delete on public.recipes to authenticated;
 
 -- Signed-out visitors may ask, but the rules above give them no rows. This is
 -- what the keep-alive check (.github/workflows/keepalive.yml) relies on: it
 -- gets an empty answer, which still counts as the database being used.
 grant select on public.recipes to anon;
-revoke insert, update on public.recipes from anon;
+revoke insert, update, delete on public.recipes from anon;
+
+-- ---------- shopping list ----------
+
+create table public.shopping_items (
+  id bigint generated always as identity primary key,
+  item text not null,
+  -- Which dish it's for; null for things she typed herself ("milk").
+  recipe_id bigint references public.recipes (id) on delete set null,
+  done boolean not null default false,
+  -- Null: the household list (Mom's and yours). Otherwise the guest whose list it is.
+  guest_id uuid references auth.users (id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+
+create index shopping_items_recipe_id_idx on public.shopping_items (recipe_id);
+create index shopping_items_guest_id_idx on public.shopping_items (guest_id);
+
+-- Same rule as recipes: only signed-in people on the allowed list, plus each
+-- guest for their own rows. Unlike recipes, list items may be deleted
+-- ("Clear ticked", taking something off).
+alter table public.shopping_items enable row level security;
+
+create policy "Allowed users can read the shopping list"
+  on public.shopping_items for select to authenticated
+  using ((select public.is_allowed()));
+
+create policy "Allowed users can add to the shopping list"
+  on public.shopping_items for insert to authenticated
+  with check ((select public.is_allowed()));
+
+create policy "Allowed users can tick the shopping list"
+  on public.shopping_items for update to authenticated
+  using ((select public.is_allowed()))
+  with check ((select public.is_allowed()));
+
+create policy "Allowed users can clear the shopping list"
+  on public.shopping_items for delete to authenticated
+  using ((select public.is_allowed()));
+
+create policy "Guests can read their own shopping list"
+  on public.shopping_items for select to authenticated
+  using (guest_id = (select auth.uid()) and (select public.is_guest()));
+
+create policy "Guests can add to their own shopping list"
+  on public.shopping_items for insert to authenticated
+  with check (guest_id = (select auth.uid()) and (select public.is_guest()));
+
+create policy "Guests can tick their own shopping list"
+  on public.shopping_items for update to authenticated
+  using (guest_id = (select auth.uid()) and (select public.is_guest()))
+  with check (guest_id = (select auth.uid()) and (select public.is_guest()));
+
+create policy "Guests can clear their own shopping list"
+  on public.shopping_items for delete to authenticated
+  using (guest_id = (select auth.uid()) and (select public.is_guest()));
+
+revoke all on public.shopping_items from anon;
+grant select, insert, update, delete on public.shopping_items to authenticated;
+
+-- ---------- meal plan ----------
+
+-- One row per dish she's planned: a day, a meal and the recipe.
+create table public.meal_plan (
+  id bigint generated always as identity primary key,
+  -- Her own calendar date (the phone's clock, in India), not a UTC moment.
+  day date not null,
+  -- Breakfast, Lunch, Snacks, Dinner, Desserts or Drinks (MEALS in app/app.js).
+  meal text not null,
+  -- Recipes are never deleted, but if one ever is, it simply leaves the plan.
+  recipe_id bigint not null references public.recipes (id) on delete cascade,
+  -- Null: the household plan. Otherwise the guest whose plan it is.
+  guest_id uuid references auth.users (id) on delete cascade,
+  -- No unique rule: the same dish can be planned any number of times, in the
+  -- same meal too (007_plan_repeats.sql). Each copy is its own row.
+  created_at timestamptz not null default now()
+);
+
+create index meal_plan_day_idx on public.meal_plan (day);
+create index meal_plan_guest_id_idx on public.meal_plan (guest_id);
+
+-- Same rule again: allowed people, plus each guest for their own rows.
+-- Dishes are added and taken off; moving one is both, so there's no update rule.
+alter table public.meal_plan enable row level security;
+
+create policy "Allowed users can read the meal plan"
+  on public.meal_plan for select to authenticated
+  using ((select public.is_allowed()));
+
+create policy "Allowed users can add to the meal plan"
+  on public.meal_plan for insert to authenticated
+  with check ((select public.is_allowed()));
+
+create policy "Allowed users can take dishes off the meal plan"
+  on public.meal_plan for delete to authenticated
+  using ((select public.is_allowed()));
+
+create policy "Guests can read their own meal plan"
+  on public.meal_plan for select to authenticated
+  using (guest_id = (select auth.uid()) and (select public.is_guest()));
+
+create policy "Guests can add to their own meal plan"
+  on public.meal_plan for insert to authenticated
+  with check (guest_id = (select auth.uid()) and (select public.is_guest()));
+
+create policy "Guests can take dishes off their own meal plan"
+  on public.meal_plan for delete to authenticated
+  using (guest_id = (select auth.uid()) and (select public.is_guest()));
+
+revoke all on public.meal_plan from anon, authenticated;
+grant select, insert, delete on public.meal_plan to authenticated;
+
+-- ---------- her photos ----------
+
+-- Private: photos are only shown through short-lived signed links, which the
+-- rules below only hand to allowed people and guests. Only allowed people can
+-- add, replace or remove them. The app always uploads a JPEG of at most
+-- 1080px, so 5 MB is far more than enough and stops anything odd.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('dish-photos', 'dish-photos', false, 5242880, array['image/jpeg']);
+
+create policy "Allowed users can see dish photos"
+  on storage.objects for select to authenticated
+  using (bucket_id = 'dish-photos' and (select public.is_allowed()));
+
+create policy "Guests can see dish photos"
+  on storage.objects for select to authenticated
+  using (bucket_id = 'dish-photos' and (select public.is_guest()));
+
+create policy "Allowed users can add dish photos"
+  on storage.objects for insert to authenticated
+  with check (bucket_id = 'dish-photos' and (select public.is_allowed()));
+
+create policy "Allowed users can replace dish photos"
+  on storage.objects for update to authenticated
+  using (bucket_id = 'dish-photos' and (select public.is_allowed()))
+  with check (bucket_id = 'dish-photos' and (select public.is_allowed()));
+
+create policy "Allowed users can remove dish photos"
+  on storage.objects for delete to authenticated
+  using (bucket_id = 'dish-photos' and (select public.is_allowed()));

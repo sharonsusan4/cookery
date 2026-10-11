@@ -4,21 +4,31 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Recipes</title>
-  <meta name="theme-color" content="#fbf7f2" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#1c1714" media="(prefers-color-scheme: dark)">
+  <!-- One theme, banana-leaf green, whatever the phone's light/dark setting. -->
+  <meta name="theme-color" content="#1c3520">
+  <meta name="color-scheme" content="dark">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@1,700&display=swap">
+  <!-- Gloock for the big words and dish names, Atkinson Hyperlegible Next for
+       everything else: made for low vision. -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Next:wght@400..700&family=Gloock&display=swap">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <!-- The bottom bar. app.js draws each tab's line icon (data-icon, from icons.js)
+       and moves the short mark along the top to the tab she's on. -->
   <nav class="tabs" aria-label="Main">
-    <a href="#today" data-tab="today">Today</a>
-    <a href="#recipes" data-tab="recipes">Recipes</a>
-    <a href="#add" data-tab="add">Add</a>
+    <div class="tabs-inner">
+      <span class="tab-mark" aria-hidden="true"></span>
+      <a href="#today" data-tab="today"><span class="tab-icon" data-icon="chef-hat" aria-hidden="true"></span>Today</a>
+      <a href="#recipes" data-tab="recipes"><span class="tab-icon" data-icon="book-2" aria-hidden="true"></span>Recipes</a>
+      <a href="#plan" data-tab="plan"><span class="tab-icon" data-icon="calendar" aria-hidden="true"></span>Plan</a>
+      <a href="#add" data-tab="add"><span class="tab-icon" data-icon="circle-plus" aria-hidden="true"></span>Add</a>
+      <a href="#list" data-tab="list"><span class="tab-icon" data-icon="list-check" aria-hidden="true"><span class="count" hidden></span></span>List</a>
+    </div>
   </nav>
 
   <main id="view" aria-live="polite"></main>
@@ -32,6 +42,7 @@
           crossorigin="anonymous"></script>
   <script src="config.js"></script>
   <script src="links.js"></script>
+  <script src="icons.js"></script>
   <script src="welcome.js"></script>
   <script src="app.js"></script>
 </body>

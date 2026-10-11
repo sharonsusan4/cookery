@@ -1,13 +1,14 @@
 // Keeps the app's own files on the phone so it opens without internet.
 // Always tries the network first, so updates show up straight away.
-// Never touches /api/ (YouTube titles) or Supabase (her recipes and sign-in):
-// those must always be fresh, and the app keeps its own copy of the list.
+// Never touches /api/ (YouTube titles) or Supabase (her recipes, sign-in,
+// shopping list, meal plan and photos): those must always be fresh, the app
+// keeps its own copy of the list and plan, and photo links are private and run out.
 
-const CACHE = 'recipes-v6';
+const CACHE = 'recipes-v24';
 // The database library, pinned to the same version as in index.html. A pinned
 // version never changes, so it's served from the cache first.
 const LIBRARY = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js';
-const FILES = ['./', 'index.html', 'styles.css', 'config.js', 'app.js', 'links.js', 'welcome.js', 'manifest.webmanifest', 'icons/icon-192.png', LIBRARY];
+const FILES = ['./', 'index.html', 'styles.css', 'config.js', 'app.js', 'links.js', 'welcome.js', 'icons.js', 'manifest.webmanifest', 'icons/icon-192.png', LIBRARY];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
@@ -30,8 +31,8 @@ self.addEventListener('fetch', e => {
     return;
   }
 
-  // Everything else from another site (Supabase, thumbnails, fonts) and the
-  // app's own /api/ is left to the browser as normal.
+  // Everything else from another site (Supabase and its photo storage,
+  // thumbnails, fonts) and the app's own /api/ is left to the browser as normal.
   if (url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
 
   e.respondWith(
