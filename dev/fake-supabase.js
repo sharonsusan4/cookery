@@ -8,9 +8,10 @@
 // can, and planned dishes can't be changed. The same dish can be planned any
 // number of times (supabase/migrations/007_plan_repeats.sql), each its own row.
 //
-// Guest mode: open http://localhost:8787/#join=family-test (the pretend
-// family code; "Make a new link" on the Visitors page makes another, and then
-// family-test stops working). A guest is an anonymous user with a row in
+// Guest mode: open http://localhost:8787/, type a name and the pretend family
+// code family-test (or open the old-style link /#join=family-test). "Change
+// code" and "Make a new code" on the Visitors page replace it, and then
+// family-test stops working. Mom and Sharon sign in at /#signin. A guest is an anonymous user with a row in
 // "guests": they read the family's recipes (owner null) and their own, and
 // only see and change shopping/plan rows with their own guest_id. An
 // anonymous user who hasn't joined sees nothing. Allowed users read every
@@ -29,12 +30,17 @@
 // recipes, built from gitignored files) and that is used instead, kept under
 // its own localStorage keys so it never mixes with the sample data. Her rows
 // may carry a photo_path ("<id>/<file>.jpg") for a picture in dev/photos/;
-// Storage hands those out as links to the server's /__dev/photos/ route.
+// Storage hands those out as links to the server's /__dev/photos/ route, and
+// tags (the Naadan / One pot collections) from dev/tags.txt. When a recipe's
+// line in that file changes, a saved pretend database takes the new tags on
+// the next load; otherwise what was changed in the app stays.
 
 (() => {
   const PASSWORD = 'recipes';
   const USERS = ['mom@example.com', 'me@example.com', 'stranger@example.com'];
   const ALLOWED = ['mom@example.com', 'me@example.com'];
+  // allowed_users.admin (migration 010): only "me" (Sharon) sees who came in (the guest list) and removes guests.
+  const ADMINS = ['me@example.com'];
   const MINE = Array.isArray(window.FAKE_MINE) ? window.FAKE_MINE : null;
   const PREFIX = MINE ? 'fake-mine-' : 'fake-';
   const DB_KEY = `${PREFIX}db`;
@@ -44,6 +50,7 @@
   const SESSION_KEY = `${PREFIX}session`;
   const GUESTS_KEY = `${PREFIX}guests`;
   const CODE_KEY = `${PREFIX}family-code`;
+  const TAGS_FILE_KEY = `${PREFIX}tags-file`; // --mine: dev/tags.txt as last put into the saved rows
   const FAILS_KEY = `${PREFIX}join-failures`;
   const FIRST_CODE = 'family-test';
   const BUCKET = 'dish-photos';
@@ -115,6 +122,13 @@
     'Lemon pickle': 'storage', 'Ginger garlic paste': 'storage', 'Idli batter for the week': 'storage', 'Dried mango strips': 'storage',
   };
 
+  // recipes.tags: the collections ('naadan', 'onepot', migration 008), or null. By sample name.
+  const TAGS = {
+    'Appam with stew': ['naadan'], 'Fish curry': ['naadan'], 'Beef fry': ['naadan'], 'Avial': ['naadan'],
+    'Pazham pori': ['naadan'], 'Rava upma': ['naadan', 'onepot'],
+    'Chicken biryani': ['onepot'], 'Lemon rice': ['onepot'], 'Mushroom shakshuka': ['onepot'],
+  };
+
   const clone = x => JSON.parse(JSON.stringify(x));
   const read = (key, fallback) => {
     try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v); } catch (e) { return fallback; }
@@ -125,7 +139,7 @@
     const now = new Date().toISOString();
     if (MINE) {
       return MINE.map(r => ({
-        notes: '', protein: null, last_cooked_at: null, photo_path: null, meals: null,
+        notes: '', protein: null, last_cooked_at: null, photo_path: null, meals: null, tags: null,
         ...r, owner: null, link_key: linkKey(r.link), created_at: now, updated_at: now,
       }));
     }
@@ -133,7 +147,7 @@
     return SAMPLE.map(([name, category, status, link, source, ingredients], i) => ({
       id: i + 1, name, category, status, link, link_key: linkKey(link), source, notes: '',
       protein: null, ingredients, last_cooked_at: daysAgo(MADE_DAYS_AGO[name]), photo_path: null,
-      effort: EFFORT[name] || null, meals: null, owner: null,
+      effort: EFFORT[name] || null, meals: null, tags: TAGS[name] || null, owner: null,
       created_at: now, updated_at: now,
     }));
   }
@@ -142,7 +156,7 @@
   const TABLES = {
     recipes: {
       key: DB_KEY, seed,
-      blank: () => ({ name: '', category: '', status: '', link_key: '', source: '', notes: '', protein: null, ingredients: null, last_cooked_at: null, photo_path: null, effort: null, meals: null, owner: null }),
+      blank: () => ({ name: '', category: '', status: '', link_key: '', source: '', notes: '', protein: null, ingredients: null, last_cooked_at: null, photo_path: null, effort: null, meals: null, tags: null, owner: null }),
       notNull: ['link'],
       canDelete: true, // only a guest's own (the rules), never a family recipe (the trigger)
     },
@@ -177,17 +191,46 @@
         const photo = new Map(MINE.filter(r => r.photo_path).map(r => [String(r.id), r.photo_path]));
         saved.forEach(r => { if (!r.photo_path && photo.has(String(r.id))) r.photo_path = photo.get(String(r.id)); });
       }
+      if (table === 'recipes') syncTags(saved);
       return saved;
     },
     save: (rows, table = 'recipes') => write(TABLES[table].key, rows),
     photos: () => Object.keys(read(STORAGE_KEY, {})),
     code: () => read(CODE_KEY, FIRST_CODE),
     reset() {
-      [DB_KEY, SHOP_KEY, PLAN_KEY, STORAGE_KEY, SESSION_KEY, GUESTS_KEY, CODE_KEY, FAILS_KEY].forEach(k => localStorage.removeItem(k));
+      [DB_KEY, SHOP_KEY, PLAN_KEY, STORAGE_KEY, SESSION_KEY, GUESTS_KEY, CODE_KEY, FAILS_KEY, TAGS_FILE_KEY].forEach(k => localStorage.removeItem(k));
       return 'Reset. Reload the page.';
     },
   };
   window.fakeDb = fakeDb;
+
+  /**
+   * A pretend database saved before tags existed gets the sample ones (or, with
+   * --mine, dev/tags.txt's). With --mine, a recipe whose line in dev/tags.txt
+   * has changed since the last load takes the file's tags; the rest keep any
+   * change made in the app. Saved straight away, so it happens once.
+   */
+  let seedTags = null;
+  function syncTags(rows) {
+    const family = r => r.owner == null;
+    let changed = false;
+    if (rows.some(r => !('tags' in r))) {
+      seedTags = seedTags || new Map(seed().map(r => [String(r.id), r.tags]));
+      rows.forEach(r => { if (!('tags' in r)) { r.tags = family(r) ? seedTags.get(String(r.id)) || null : null; changed = true; } });
+    }
+    if (MINE) {
+      const file = Object.fromEntries(MINE.map(r => [String(r.id), (r.tags || []).join(',')]));
+      const last = read(TAGS_FILE_KEY, null);
+      if (last) {
+        rows.forEach(r => {
+          const id = String(r.id);
+          if (family(r) && id in file && file[id] !== last[id]) { r.tags = file[id] ? file[id].split(',') : null; changed = true; }
+        });
+      }
+      if (JSON.stringify(last) !== JSON.stringify(file)) write(TAGS_FILE_KEY, file);
+    }
+    if (changed) write(DB_KEY, rows);
+  }
 
   // Like a real request: a short wait, and it can fail when "offline".
   async function network(what) {
@@ -200,6 +243,7 @@
   const session = () => read(SESSION_KEY, null);
   const uid = () => { const s = session(); return s ? s.user.id : null; };
   const allowed = () => { const s = session(); return !!s && ALLOWED.includes(String(s.user.email || '').toLowerCase()); };
+  const admin = () => { const s = session(); return !!s && ADMINS.includes(String(s.user.email || '').toLowerCase()); };
   const isGuest = () => !!uid() && fakeDb.rows('guests').some(g => g.user_id === uid());
   const same = (a, b) => String(a ?? null) === String(b ?? null);
 
@@ -222,7 +266,7 @@
       see: r => allowed() || (isGuest() && r.guest_id === uid()),
       add: r => allowed() || (isGuest() && r.guest_id === uid()),
     },
-    guests: { see: () => allowed(), add: () => false },
+    guests: { see: () => admin(), add: () => false },
   };
   const rls = table => ({ code: '42501', message: `new row violates row-level security policy for table "${table}"` });
 
@@ -411,7 +455,10 @@
     };
   }
 
-  // ---------- rpc() functions (supabase/migrations/005_guests.sql) ----------
+  // ---------- rpc() functions (supabase/migrations/005_guests.sql, 009_family_code.sql) ----------
+
+  // private.clean_family_code(): lowercase, trimmed, inner spaces made single.
+  const cleanCode = code => String(code ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
 
   const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
   const notAllowed = what => ({ code: '42501', message: `Only allowed users can ${what}` });
@@ -419,13 +466,14 @@
 
   const RPC = {
     is_allowed: () => allowed(),
+    is_admin: () => admin(),
     is_guest: () => isGuest(),
     join_family({ code, name }) {
       const id = uid();
       if (!id || allowed()) return false;
       const fails = read(FAILS_KEY, []).filter(f => f.user_id === id && Date.now() - f.at < 15 * 60000);
       if (fails.length >= 10) return false;
-      if (String(code ?? '').trim().toLowerCase() !== fakeDb.code()) {
+      if (cleanCode(code) !== cleanCode(fakeDb.code())) {
         write(FAILS_KEY, [...read(FAILS_KEY, []).filter(f => Date.now() - f.at < 86400000), { user_id: id, at: Date.now() }]);
         return false;
       }
@@ -454,12 +502,20 @@
       write(CODE_KEY, code);
       return code;
     },
+    set_family_code({ code }) {
+      if (!allowed()) throw notAllowed('change the family code');
+      const clean = cleanCode(code);
+      if (clean.length < 6) throw { code: '22023', message: 'The family code needs at least 6 letters or numbers.' };
+      if (clean.length > 40) throw { code: '22023', message: 'The family code can have at most 40 letters or numbers.' };
+      write(CODE_KEY, clean);
+      return clean;
+    },
     get_family_code() {
       if (!allowed()) throw notAllowed('see the family link');
       return fakeDb.code();
     },
     remove_guest({ guest }) {
-      if (!allowed()) throw notAllowed('remove a guest');
+      if (!admin()) throw notAllowed('remove a guest');
       const rows = fakeDb.rows('guests');
       saveGuests(rows.filter(g => g.user_id !== guest));
       return rows.some(g => g.user_id === guest);

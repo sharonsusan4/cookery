@@ -47,6 +47,20 @@ npx supabase db query --linked --project-ref $REF -f supabase/migrations/006_mea
 
 (Or paste each file into **SQL Editor → New query → Run**.)
 
+### 2b. The family code you choose (009)
+
+Run this before deploying the version with the **Family code** box on Visitors and the name + code welcome (sw `recipes-v28`). It adds `set_family_code()` and makes `join_family()` ignore capitals and extra spaces on both sides. It's idempotent and one transaction, and it leaves the current code as it is (so old links keep working until you change it).
+
+```bash
+npx supabase db query --linked --project-ref $REF -f supabase/migrations/009_family_code.sql
+```
+
+Check it went in (read-only):
+
+```bash
+npx supabase db query --linked --project-ref $REF "select proname from pg_proc where proname in ('set_family_code', 'clean_family_code')"
+```
+
 At this point the live app (the old version) still works for Mom. It doesn't ask for the new columns, and every existing row has `owner` / `guest_id` / `meals` null.
 
 ## 3. Check the rules (rolled back, changes nothing)
@@ -71,7 +85,7 @@ npx supabase db query --linked --project-ref $REF "select (select count(*) from 
 ## 4. Switch on anonymous sign-ins (dashboard)
 
 1. **Authentication → Sign In / Providers**, turn on **Allow anonymous sign-ins**, and click **Save**.
-2. **Watch out:** Supabase refuses anonymous sign-ins while **Allow new users to sign up** is off, because it counts each one as a sign-up. The README told you to switch that off. If the family link says *"Guest mode isn't switched on yet"* after step 5, turn **Allow new users to sign up** back on. That's safe for her data: someone who signs up with an email is neither on `allowed_users` nor a guest, so the rules give them nothing. Keep **Confirm email** on so such accounts can't even sign in unconfirmed.
+2. **Watch out:** Supabase refuses anonymous sign-ins while **Allow new users to sign up** is off, because it counts each one as a sign-up. The README told you to switch that off. If the welcome says *"Guest mode isn't switched on yet"* after step 5, turn **Allow new users to sign up** back on. That's safe for her data: someone who signs up with an email is neither on `allowed_users` nor a guest, so the rules give them nothing. Keep **Confirm email** on so such accounts can't even sign in unconfirmed.
 3. **CAPTCHA: don't switch it on yet.** Supabase's CAPTCHA protection (Authentication → Attack Protection) applies to *every* sign-in, including Mom's email and password, and this app doesn't send a CAPTCHA token yet. Turning it on would lock everyone out. It needs a small app change first (an hCaptcha or Turnstile widget on the sign-in and welcome screens).
 4. **Rate limits:** Supabase allows by default **30 anonymous sign-ins per hour per IP address** (Authentication → Rate Limits → "anonymous users"). That's plenty for family, but a group joining from one home Wi-Fi in one go could hit it. They'd see *"Too many people tried just now"*, and waiting a few minutes fixes it. On top of that, `join_family()` refuses after 10 wrong codes in 15 minutes from one anonymous session.
 
@@ -90,12 +104,13 @@ On your own phone or computer, open https://cookery-five.vercel.app and sign in 
 - A recipe page has everything (status, notes, photo, "I made this today") plus "Shows in: … · Change".
 - Then glance at Mom's phone: it should open straight into "Yo Mom" as usual.
 
-## 7. Create the first family link
+## 7. Set the family code
 
 1. Today → **Visitors** (at the bottom).
-2. Under **Family link** there's already a link (005 made a random code). **Copy** it, or **Share** (opens WhatsApp on Android).
-3. Try it yourself first in a private/incognito window: the welcome says *"What's your name?"*. Type a name, tap **Continue as guest**, check you land on "Yo <name>", then **Leave guest mode** at the bottom of Today.
-4. Send it to the family. If a link ever goes somewhere it shouldn't, **Make a new link**: the old one stops letting anyone new in, and people already in stay in. To shut someone out, **Remove** them on Visitors.
+2. Under **Family code** there's already a random code (005 made it). Tap **Change code** and choose one family will remember but strangers won't guess (6 to 40 characters; capitals and extra spaces don't matter).
+3. Try it yourself first in a private/incognito window: open https://cookery-five.vercel.app, type a name and the code, tap **Continue as guest**, check you land on "Yo <name>", then **Leave guest mode** at the bottom of Today.
+4. **Share** (opens WhatsApp on Android) or **Copy** sends: "Open https://cookery-five.vercel.app and tap Continue as guest. Family code: …". If the code ever goes somewhere it shouldn't, change it (or **Make a new code** for a random one): the old one stops letting anyone new in, and people already in stay in. To shut someone out, **Remove** them on Visitors.
+5. Mom and you sign in at https://cookery-five.vercel.app/#signin (the plain address shows only the family welcome). The address is at the bottom of Visitors too.
 
 ## If something breaks
 
@@ -160,4 +175,4 @@ Then switch **Allow anonymous sign-ins** off (and **Allow new users to sign up**
 ## Later, now and then
 
 - Anonymous users pile up a little: each failed join and each "Leave guest mode" leaves one behind. **Authentication → Users**, filter anonymous, and delete old ones. Deleting a guest's user also deletes their guest row and everything they added (the foreign keys cascade).
-- A removed guest's rows stay, hidden from everyone, in case they come back on the same phone with a current link. Deleting their anonymous user clears them.
+- A removed guest's rows stay, hidden from everyone, in case they come back on the same phone with the current code. Deleting their anonymous user clears them.

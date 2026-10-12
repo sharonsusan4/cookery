@@ -11,21 +11,30 @@
 //
 // Test sign-ins for --fake: mom@example.com or me@example.com (allowed),
 // stranger@example.com (signs in but isn't allowed), all with the password
-// "recipes". Guest mode: open http://localhost:8787/#join=family-test (the
-// pretend family code), type any name and tap Continue as guest. A bad code,
-// e.g. #join=nope, shows the "expired" message. "Make a new link" on the
-// Visitors page replaces family-test with a random code (fakeDb.code() shows
-// it; fakeDb.reset() goes back to family-test).
+// "recipes", at http://localhost:8787/#signin (the plain address shows only
+// the guest welcome). Guest mode: open http://localhost:8787/, type any name
+// and the pretend family code family-test, and tap Continue as guest. The
+// old-style link http://localhost:8787/#join=family-test still works; a bad
+// one, e.g. #join=nope, says the link is old and asks for the code. "Change
+// code" or "Make a new code" on the Visitors page replaces family-test
+// (fakeDb.code() shows it; fakeDb.reset() goes back to family-test).
 //
 //   node recipe-app/dev/server.js --fake --mine
 //
 // --mine fills the pretend database with Mom's real recipes instead, built in
 // memory from the gitignored files on this computer (dev/fixture.json,
-// dev/ingredients-1.txt, -2.txt and dev/ingredients-effort.txt), so the app can
+// dev/ingredients-1.txt, -2.txt and dev/ingredients-effort.txt, and
+// dev/tags.txt if it's there), so the app can
 // be judged with real dishes and real YouTube pictures. Nothing is written to
 // disk and nothing goes near Supabase; the page gets it from /__dev/mine.js
 // (also readable as /__dev/mine.json) and keeps it under separate localStorage
 // keys from the sample data.
+//
+// Collections: dev/tags.txt (gitignored, optional) has one line per recipe,
+// "<id> naadan,onepot" or just "<id> naadan"; "#" starts a comment. A recipe
+// without a line is in none. It's read again each time the page loads the
+// seed; a saved pretend database takes a recipe's new line from the file the
+// next time the page loads, and keeps changes made in the app otherwise.
 //
 // Her own pictures: a recipe gets the first picture in dev/photos/<id>/
 // (gitignored) as its photo_path, "<id>/<file>.jpg", the same value the real
@@ -44,6 +53,8 @@ const meta = require('../api/meta.js');
 const ROOT = path.join(__dirname, '..');
 const APP_DIR = path.join(ROOT, 'app');
 const PHOTOS_DIR = path.join(__dirname, 'photos');
+const TAGS_FILE = path.join(__dirname, 'tags.txt');
+const TAG_KEYS = ['naadan', 'onepot']; // COLLECTIONS in app/app.js
 const PHOTO_TYPES = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' };
 const PORT = Number(process.env.PORT || 8787);
 const MINE = process.argv.includes('--mine');
@@ -73,11 +84,36 @@ function mineSeed() {
     const [id, label] = line.trim().split(/\s+/);
     if (['quick', 'gourmet', 'storage'].includes(label)) effort[id] = label;
   }
+  const tags = mineTags().tags;
   return rows.map(([name, category, status, link, source], i) => ({
     id: i + 1, name: name ?? '', category: category ?? '', status: status ?? '', link: link ?? '', source: source ?? '',
     ingredients: ingredients[i + 1] || null, effort: effort[i + 1] || null,
-    photo_path: minePhoto(i + 1),
+    photo_path: minePhoto(i + 1), tags: tags[i + 1] || [],
   }));
+}
+
+/**
+ * dev/tags.txt as { tags: { <id>: ['naadan', 'onepot'] }, problems: [...] }.
+ * No file (it's optional, and may be half written) is no tags. Words that
+ * aren't a collection key are left out and listed in `problems`.
+ */
+function mineTags() {
+  const tags = {}, problems = [];
+  let text;
+  try { text = fs.readFileSync(TAGS_FILE, 'utf8'); } catch (e) {
+    if (e.code === 'ENOENT') return { tags, problems };
+    throw e;
+  }
+  text.split('\n').forEach((raw, n) => {
+    const line = raw.replace(/#.*/, '').trim();
+    if (!line) return;
+    const m = line.match(/^(\d+)(?:\s+(.*))?$/);
+    if (!m) return problems.push(`line ${n + 1}: no recipe id`);
+    const words = (m[2] || '').split(/[\s,]+/).map(w => w.toLowerCase()).filter(Boolean);
+    for (const w of words) if (!TAG_KEYS.includes(w)) problems.push(`line ${n + 1}: "${w}" isn't naadan or onepot`);
+    tags[m[1]] = TAG_KEYS.filter(k => words.includes(k));
+  });
+  return { tags, problems };
 }
 
 /** "<id>/<file>" for the first picture in dev/photos/<id>/, or null. */
@@ -176,10 +212,15 @@ http.createServer((req, res) => {
   if (MINE) {
     const rows = JSON.parse(mine);
     console.log(`Pretend database filled with Mom’s ${rows.length} recipes (this computer only), ${rows.filter(r => r.photo_path).length} with a photo from dev/photos/.`);
+    const { problems } = mineTags();
+    console.log(fs.existsSync(TAGS_FILE)
+      ? `Collections from dev/tags.txt: ${rows.filter(r => r.tags.includes('naadan')).length} Naadan, ${rows.filter(r => r.tags.includes('onepot')).length} One pot.`
+      : 'No dev/tags.txt yet, so no recipe is in a collection.');
+    problems.slice(0, 10).forEach(p => console.log(`  dev/tags.txt ${p}`));
   }
   if (FAKE) {
-    console.log('Pretend database: sign in as mom@example.com or me@example.com, password "recipes".');
+    console.log(`Pretend database: sign in at http://localhost:${PORT}/#signin as mom@example.com or me@example.com, password "recipes".`);
     console.log('stranger@example.com (same password) can sign in but isn’t on the allowed list.');
-    console.log(`Guest mode: http://localhost:${PORT}/#join=family-test`);
+    console.log(`Guest mode: http://localhost:${PORT}/ with the family code family-test (or the old link /#join=family-test)`);
   }
 });

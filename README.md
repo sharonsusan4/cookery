@@ -18,8 +18,8 @@ What it does:
 - **Quick & easy / Gourmet** come from the `effort` column: `quick`, `gourmet`, `storage` (pickles, pastes, batters: only ever in the Recipes tab) or empty for everyday dishes, which count as Quick & easy. It can't be changed in the app yet; set it in **Table Editor**.
 - **Remove**: sets the status to *Not Interested*. Nothing is ever deleted. Recipes she named "ignore" are hidden as well.
 - **Shows in**: under a recipe's category, "Shows in: Lunch, Dinner · Change". Change opens the six meals as toggles; each tap saves straight away ("Now shows in Lunch"), at least one stays on, and *Reset to category* goes back to the category's meals. Today, the first page, suggestions, the Plan picker and *Add to plan* all follow it. Whether a dish is a main dish or *On the side* for a meal still follows its category. Kept in `recipes.meals` (null = the category's meals).
-- **Guest mode**: family members get in with the **family link** (`…/#join=<code>`), no email and no password. They type their name, tap *Continue as guest*, and the first page says "Yo <name>". They see Mom's recipes (name, category, "Mom loved this", ingredients, picture, the link), but nothing that would change hers and none of her notes. They have their own plan, shopping list and recipes (marked *Yours*), which Mom never sees. *Leave guest mode* at the bottom of Today ends it on that phone (and deletes their plan, list and recipes). The code travels after the `#`, so it never reaches a server log, and it's taken out of the address as soon as they're in.
-- **Visitors** (Mom and you only): a quiet link next to *Sign out* on Today. It lists who came in, when they first and last visited, and what they planned or added. *Remove* (with *Undo*) shuts someone out. *Family link* has *Copy* and *Share* (WhatsApp on Android), and *Make a new link* stops old links letting anyone new in.
+- **Guest mode**: family members open the plain address and type their name and the secret **family code**, no email and no password. They tap *Continue as guest*, and the first page says "Yo <name>". Sharon sets the code on **Visitors** (short and easy to remember, 6 to 40 characters) and shares it from there. Old family links (`…/#join=<code>`) still work while their code is current; they only ask for a name. They see Mom's recipes (name, category, "Mom loved this", ingredients, picture, the link), but nothing that would change hers and none of her notes. They have their own plan, shopping list and recipes (marked *Yours*), which Mom never sees. *Leave guest mode* at the bottom of Today ends it on that phone (and deletes their plan, list and recipes). An old link's code travels after the `#`, so it never reaches a server log, and it's taken out of the address as soon as they're in.
+- **Visitors** (Mom and you only): a quiet link next to *Sign out* on Today. It lists who came in, when they first and last visited, and what they planned or added. *Remove* (with *Undo*) shuts someone out. *Family code* shows the code in large letters with *Copy* and *Share* (WhatsApp on Android; the message says to open the app address and tap *Continue as guest*). *Change code* sets one you choose; *Make a new code* makes a random one. Either stops the old code letting anyone new in. At the bottom: the `#signin` address, for signing in on a new phone.
 
 ```
 app/          the phone app (plain files; this is what Vercel serves)
@@ -79,7 +79,7 @@ That key is meant to be public, so it's fine in a public repo: what keeps her re
 2. Click **Add New → Project**, find the `cookery` repo, and click **Import**.
 3. Set **Framework Preset** to **Other**. Leave **Root Directory** as it is, and leave the build settings alone (there's no build command; `vercel.json` already tells Vercel to serve the `app` folder).
 4. Click **Deploy**. After a minute you get a link like `https://cookery-something.vercel.app`. You can pick a nicer name under **Settings → Domains**.
-5. Open the link on your computer and sign in with your own account to check that her recipes show up.
+5. Open the link with `#signin` on the end (`https://cookery-something.vercel.app/#signin`) on your computer and sign in with your own account to check that her recipes show up. The plain address only shows the family welcome (name and family code); the email sign-in is at `#signin`, and nothing on the plain address points to it.
 
 ### 6. Keep the database awake
 
@@ -99,7 +99,7 @@ GitHub switches off scheduled Actions in a repo that's had no commits for 60 day
 ### 8. Mom's phone
 
 1. Remove the old Recipes app: press and hold its icon, then **Uninstall** (or **Remove**). It's the old GitHub Pages version and won't get her new recipes.
-2. In Chrome, open the Vercel link and sign in with her email and password. She stays signed in from then on.
+2. In Chrome, open the Vercel link with `#signin` on the end (e.g. `https://cookery-five.vercel.app/#signin`) and sign in with her email and password. She stays signed in from then on, and the app opens straight in from the plain address. (The same line is at the bottom of Visitors, for the next new phone.)
 3. Open the **⋮** menu, then **Add to Home screen** (or **Install app**).
 4. Open YouTube, tap **Share** on any video, and **Recipes** should be in the list. It can take a minute to appear after installing.
 
@@ -117,11 +117,14 @@ Run [supabase/migrations/004_meal_plan.sql](supabase/migrations/004_meal_plan.sq
 
 ### Adding guest mode and "Shows in" (once, on an existing project)
 
-[supabase/migrations/005_guests.sql](supabase/migrations/005_guests.sql) adds guest mode and [006_meals.sql](supabase/migrations/006_meals.sql) adds the per-dish meals. Both must be run *before* pushing the app version that uses them. Guest mode also needs **Allow anonymous sign-ins** switched on in the dashboard. Follow [dev/GUEST-ROLLOUT.md](dev/GUEST-ROLLOUT.md) step by step: backup, migrations, the rolled-back rules check ([dev/guest-rls-test.sql](dev/guest-rls-test.sql)), dashboard switches, deploy, checks, the first family link, and how to undo it all.
+[supabase/migrations/005_guests.sql](supabase/migrations/005_guests.sql) adds guest mode and [006_meals.sql](supabase/migrations/006_meals.sql) adds the per-dish meals. Both must be run *before* pushing the app version that uses them. Guest mode also needs **Allow anonymous sign-ins** switched on in the dashboard. Follow [dev/GUEST-ROLLOUT.md](dev/GUEST-ROLLOUT.md) step by step: backup, migrations, the rolled-back rules check ([dev/guest-rls-test.sql](dev/guest-rls-test.sql)), dashboard switches, deploy, checks, the first family code, and how to undo it all.
+
+[supabase/migrations/009_family_code.sql](supabase/migrations/009_family_code.sql) lets you choose the family code (`set_family_code()`) and makes `join_family()` ignore capitals and extra spaces. Run it *before* deploying the version with the **Family code** box on Visitors (sw `recipes-v28`); see step 2b in [dev/GUEST-ROLLOUT.md](dev/GUEST-ROLLOUT.md).
 
 How guest mode is kept safe:
 - A guest is a Supabase **anonymous user** with a row in `public.guests`. They only get that row from `join_family(code, name)` with the current code. An anonymous user without one sees nothing.
-- The code lives in `private.family_code`, a schema the API doesn't expose, so guests can never read it. Only Mom and you can (`get_family_code()`, `new_family_code()`); 10 wrong codes in 15 minutes and that session stops being checked.
+- The code lives in `private.family_code`, a schema the API doesn't expose, so guests can never read it. Only Mom and you can (`get_family_code()`, `new_family_code()`, `set_family_code()`); 10 wrong codes in 15 minutes and that session stops being checked.
+- A short code you choose is easier to guess than a random one. Each try needs a new anonymous sign-in (Supabase allows about 30 per hour per IP address), so keep it 6 characters or more (the database insists), pick something family know and strangers wouldn't, and change it if it ever goes somewhere it shouldn't. People already in stay in.
 - Mom's rules are unchanged. Guests get rules of their own: read recipes with `owner is null` (Mom's) or their own, and add, change or delete only their own (`owner` = them). Shopping list and plan rows likewise, only where `guest_id` = them. Dish photos: look, never add, replace or remove.
 - Mom's recipes still can't be deleted through the app: a trigger refuses to delete any recipe with no owner.
 - The app asks only for `owner is null` / `guest_id is null` when Mom or you are signed in, so guests' rows never show up in her lists.
@@ -140,7 +143,7 @@ If you change the database, do it in **SQL Editor** with a new file in `supabase
 node recipe-app/dev/server.js --fake
 ```
 
-Then open http://localhost:8787. For guest mode, open http://localhost:8787/#join=family-test (the pretend family code). `--fake` swaps Supabase for a pretend database in the browser ([dev/fake-supabase.js](dev/fake-supabase.js)) with a few made-up recipes (some already "made" recently), an empty shopping list and meal plan, and pretend photo storage, so you can try everything without touching hers. The test sign-ins are at the top of that file. In the browser console, `fakeDb.reset()` starts over and `fakeDb.offline = true` pretends the internet is down.
+Then open http://localhost:8787/#signin to sign in, or http://localhost:8787 for guest mode with the pretend family code `family-test` (the old-style link http://localhost:8787/#join=family-test works too). `--fake` swaps Supabase for a pretend database in the browser ([dev/fake-supabase.js](dev/fake-supabase.js)) with a few made-up recipes (some already "made" recently), an empty shopping list and meal plan, and pretend photo storage, so you can try everything without touching hers. The test sign-ins are at the top of that file. In the browser console, `fakeDb.reset()` starts over and `fakeDb.offline = true` pretends the internet is down.
 
 `node recipe-app/dev/server.js --fake --mine` fills the pretend database with Mom's real recipes instead, built in memory from her gitignored files in `dev/` (only on a computer that has them), so the tiles and lists look the way she'll see them. Only this computer can open it.
 
@@ -155,5 +158,5 @@ Without `--fake` it uses the real project from `app/config.js`, so anything you 
 - **Photos** are private: the app asks Supabase for links that work for a few hours. Changing a photo removes the old file. They count towards the free plan's 1 GB of storage; at a few hundred KB each that's thousands of photos.
 - **Backups**: the free plan doesn't keep backups you can download. Every so often, open **Table Editor → recipes** in Supabase and use **Export → CSV**. Keep that file private.
 - **Sign out** is at the bottom of the Today tab, in case you ever sign in on someone else's phone.
-- **Guests and notes**: guests never see Mom's notes in the app, which never asks for them. But the database rules work per row, not per column, so someone technically minded with the family link could still ask the database directly for the notes on her recipes (and her rating, last-made date and so on). Don't put anything in a note that the family shouldn't read.
+- **Guests and notes**: guests never see Mom's notes in the app, which never asks for them. But the database rules work per row, not per column, so someone technically minded with the family code could still ask the database directly for the notes on her recipes (and her rating, last-made date and so on). Don't put anything in a note that the family shouldn't read.
 - **Removing a guest** hides everything from them at once. Their own rows stay, hidden, in case they come back on the same phone with a current link. Deleting their anonymous user (Authentication → Users) clears it all. Anonymous users from failed joins and *Leave guest mode* pile up slowly; delete old ones now and then.

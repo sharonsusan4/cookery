@@ -7,28 +7,40 @@
    don'ts) is in DESIGN.md at the root of recipe-app; keep the two in step. */
 
 :root {
-  /* ---- palette ---- */
-  --leaf: #1c3520;           /* the page */
-  --leaf-deep: #142817;      /* the bottom bar, fields, wells */
-  --leaf-raised: #22402a;    /* cards on the page: plan meals, choosers, lists */
-  --leaf-glow: #28492d;      /* the soft light at the top of every screen (brass stays 4.5:1 on it) */
-  --cream: #f4ebd6;          /* text on the leaf; dish cards */
-  --cream-2: #d2c8af;        /* secondary text (8.0:1 on leaf, 6.8:1 on raised) */
-  --cream-3: #bcb69c;        /* quiet text, tab labels (6.5:1 on leaf, 5.5:1 on raised, 4.9:1 on the glow) */
-  --plate: #fbf4e2;          /* the "Try this" plate */
-  --plate-ring: #eadfc2;
-  --hairline: rgba(244, 235, 214, 0.13);   /* decorative rules only */
-  --line-strong: #8a9a7f;    /* field and button outlines (4.4:1 on leaf, 3.7:1 on raised) */
-  --brass: #d4a84b;          /* labels, the chosen thing, primary buttons (6.0:1 on leaf) */
-  --brass-soft: rgba(212, 168, 75, 0.22);
-  --on-brass: #142817;       /* text on brass (7.1:1) */
-  --ink: #1f3b22;            /* text on cream (10.4:1) */
-  --ink-2: #55624f;          /* quiet text on cream (5.5:1) */
-  --ink-link: #7a5410;       /* a link on cream, e.g. "Undo" in a message (5.7:1) */
-  --danger: #f2a08f;         /* Remove (6.5:1 on leaf) */
-  --warning: #e8c374;        /* "You already saved this" (7.9:1 on leaf) */
-  --xo-x: #f4ebd6;           /* first page: X squares (cream) */
-  --xo-o: #ddbb75;           /* first page: O squares (sand) */
+  /* ---- palette: "Sorbet" (chosen by Mom, Oct 2026) ---- */
+  /* A light, warm page; each dish card on its own soft pastel; coral for the
+     things that matter. The variable names come from the earlier dark "Banana
+     leaf" theme: --leaf* are the page surfaces, --cream/--text the page text,
+     --brass the accent. */
+  --leaf: #fdf8f4;           /* the page */
+  --leaf-deep: #f4ece4;      /* the bottom bar, fields, wells */
+  --leaf-raised: #ffffff;    /* cards on the page: plan meals, choosers, lists */
+  --leaf-glow: #fff4ec;      /* the soft light at the top of every screen */
+  --cream: #2e2622;          /* text on the page */
+  --text: var(--cream);
+  --card: #ffffff;           /* dish cards (a pastel per dish type, below) and the toast */
+  --vein: rgba(196, 81, 58, 0.03); /* the faint diagonal lines */
+  --cream-2: #5f544d;        /* secondary text */
+  --cream-3: #6e625a;        /* quiet text, tab labels */
+  --plate: #ffffff;          /* the "Try this" plate */
+  --plate-ring: #fbe3d6;
+  --hairline: color-mix(in srgb, var(--text) 13%, transparent);   /* decorative rules only */
+  --line-strong: #948579;    /* field and button outlines (3:1 or better) */
+  --brass: #b4462f;          /* the accent: labels, the chosen thing, primary buttons (4.7:1 or better on every surface; white on it 5.4:1) */
+  --brass-soft: color-mix(in srgb, var(--brass) 22%, transparent);
+  --on-brass: #ffffff;       /* text on the accent */
+  --ink: #2e2622;            /* text on cards */
+  --ink-2: #5f544d;          /* quiet text on cards */
+  --ink-link: #a8402b;       /* a link on a card, e.g. "Undo" in a message */
+  --danger: #b3261e;         /* Remove */
+  --warning: #8a5a00;        /* "You already saved this" */
+  --xo-x: #fce3d6;           /* first page: X squares (peach) */
+  --xo-o: #e3e0f4;           /* first page: O squares (lilac) */
+
+  /* The pastel behind each kind of dish (the icon colour below says the same thing). */
+  --orange-bg: #fce3d6; --red-bg: #f9dcdc; --green-bg: #e0f1e7; --olive-bg: #ecefd8;
+  --yellow-bg: #fbefcf; --pink-bg: #f9dde8; --plum-bg: #ece2f4; --teal-bg: #d9eef0;
+  --brown-bg: #f2e5d7; --blue-bg: #dde8f6; --gray-bg: #eeebe7;
 
   /* Dish icons on cream: the colour says what kind of dish it is. All at
      least 4.6:1 on cream, so even the thin lines read clearly. */
@@ -63,7 +75,7 @@
   --r-lg: 16px;   /* dish cards */
   --r-xl: 20px;   /* green cards, pictures */
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.22), 0 10px 22px -14px rgba(0, 0, 0, 0.65);
-  --shadow-raised: inset 0 1px 0 rgba(244, 235, 214, 0.05), 0 12px 28px -20px rgba(0, 0, 0, 0.7);
+  --shadow-raised: inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent), 0 12px 28px -20px rgba(0, 0, 0, 0.7);
   --shadow-float: 0 2px 4px rgba(0, 0, 0, 0.25), 0 16px 34px -14px rgba(0, 0, 0, 0.6);
 
   /* ---- motion: calm, never bouncy ---- */
@@ -73,7 +85,7 @@
 
   --nav-h: 68px;
   --gutter: 16px;
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
@@ -98,9 +110,9 @@ body {
   background-color: var(--leaf);
   background-image:
     radial-gradient(120% 420px at 50% -60px, var(--leaf-glow) 0%, transparent 70%),
-    repeating-linear-gradient(118deg, transparent 0 46px, rgba(255, 255, 255, 0.03) 46px 47px);
+    repeating-linear-gradient(118deg, transparent 0 46px, var(--vein) 46px 47px);
   background-repeat: no-repeat, repeat;
-  color: var(--cream);
+  color: var(--text);
   font-family: var(--sans);
   font-size: var(--fs-base);
   line-height: 1.5;
@@ -155,7 +167,7 @@ main > p.muted:first-of-type { font-size: 17px; }
 
 /* ---- fields: dark wells with a clear outline; brass when in use ---- */
 
-label.field { display: block; font-size: var(--fs-sm); font-weight: 600; color: var(--cream-2); margin: var(--s5) 0 var(--s2); }
+label.field, .field-label { display: block; font-size: var(--fs-sm); font-weight: 600; color: var(--cream-2); margin: var(--s5) 0 var(--s2); }
 
 input[type=text], input[type=url], input[type=search], input[type=email], input[type=password], textarea, select {
   font: inherit;
@@ -166,7 +178,7 @@ input[type=text], input[type=url], input[type=search], input[type=email], input[
   border-radius: var(--r-md);
   border: 1px solid var(--line-strong);
   background-color: var(--leaf-deep);
-  color: var(--cream);
+  color: var(--text);
   box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.18);
   transition: border-color var(--t-press) ease, box-shadow var(--t-press) ease;
 }
@@ -180,14 +192,14 @@ select {
   background-size: 20px;
   text-overflow: ellipsis;
 }
-select option { background: var(--leaf-deep); color: var(--cream); }
+select option { background: var(--leaf-deep); color: var(--text); }
 input::placeholder, textarea::placeholder { color: var(--cream-3); opacity: 1; }
 input:focus, textarea:focus, select:focus { outline: none; border-color: var(--brass); box-shadow: 0 0 0 3px var(--brass-soft); }
 button:focus-visible, a:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
 
 .error { color: var(--danger); font-size: var(--fs-sm); margin: var(--s2) 0 0; }
 .warning { color: var(--warning); font-size: var(--fs-sm); margin: var(--s2) 0 0; }
-.warning a, .warning .inline-link { color: var(--cream); }
+.warning a, .warning .inline-link { color: var(--text); }
 .hint { margin: 6px 0 0; }
 
 /* ---- buttons: brass for the main thing, a cream outline for the rest ---- */
@@ -200,7 +212,7 @@ button, .btn {
   border-radius: var(--r-md);
   border: 1.5px solid var(--line-strong);
   background: transparent;
-  color: var(--cream);
+  color: var(--text);
   font-weight: 600;
   cursor: pointer;
   display: inline-flex;
@@ -210,7 +222,7 @@ button, .btn {
   text-decoration: none;
   transition: transform var(--t-press) var(--ease), background-color var(--t-press) ease, border-color var(--t-press) ease;
 }
-button:active, .btn:active { transform: scale(0.98); background-color: rgba(244, 235, 214, 0.06); }
+button:active, .btn:active { transform: scale(0.98); background-color: color-mix(in srgb, var(--text) 6%, transparent); }
 button:disabled { opacity: 0.6; }
 .primary, .btn.primary {
   background: var(--brass); color: var(--on-brass); border-color: var(--brass); font-weight: 700;
@@ -241,7 +253,7 @@ button:disabled { opacity: 0.6; }
   border: none; background: none; box-shadow: none; border-radius: var(--r-md); gap: 2px;
   color: var(--brass); font-size: 17px; font-weight: 600;
 }
-.back-btn:active { background: rgba(244, 235, 214, 0.06); transform: none; }
+.back-btn:active { background: color-mix(in srgb, var(--text) 6%, transparent); transform: none; }
 .back-chevron { width: 26px; height: 26px; stroke-width: 1.6; flex: none; }
 
 /* A two-way or four-way choice: one bar split by hairlines; the chosen part brass. */
@@ -262,12 +274,12 @@ button:disabled { opacity: 0.6; }
 
 .prompt { border-bottom: 1px solid var(--hairline); padding-bottom: 20px; margin-bottom: 28px; }
 .prompt .row { margin-bottom: 4px; }
-.prompt label.field { margin-top: 0; color: var(--cream); font-weight: 600; font-size: 17px; }
+.prompt label.field { margin-top: 0; color: var(--text); font-weight: 600; font-size: 17px; }
 
 .picture {
   display: block; aspect-ratio: 16 / 9; border-radius: var(--r-xl); overflow: hidden;
   background: var(--leaf-deep); margin: 0 0 var(--s4);
-  box-shadow: 0 0 0 1px rgba(212, 168, 75, 0.28), var(--shadow-float);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brass) 28%, transparent), var(--shadow-float);
 }
 .picture img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
@@ -278,8 +290,8 @@ button:disabled { opacity: 0.6; }
   background-color: var(--leaf);
   background-image:
     radial-gradient(120% 60% at 50% -10%, var(--leaf-glow) 0%, transparent 62%),
-    repeating-linear-gradient(118deg, transparent 0 46px, rgba(255, 255, 255, 0.03) 46px 47px);
-  color: var(--cream);
+    repeating-linear-gradient(118deg, transparent 0 46px, var(--vein) 46px 47px);
+  color: var(--text);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   padding: calc(24px + env(safe-area-inset-top)) var(--gutter) calc(24px + env(safe-area-inset-bottom));
   text-align: center;
@@ -317,19 +329,19 @@ body.welcome-open { overflow: hidden; }
 /* A guest's name can be long; it wraps rather than running off the screen. */
 .welcome-title { overflow-wrap: anywhere; }
 .welcome-title .hi { color: var(--brass); }
-.welcome-title .mom { color: var(--cream); }
+.welcome-title .mom { color: var(--text); }
 .welcome-lead { color: var(--cream-2); font-size: var(--fs-md); margin: 12px 0 0; }
 /* The meal word: one line, each word sliding up into the same place. */
 .welcome-meal {
   position: relative; width: 100%; height: 66px; overflow: hidden;
   margin: 0 0 24px;
   font-family: var(--display); font-weight: 400; font-synthesis: none;
-  font-size: 50px; line-height: 66px; letter-spacing: -0.01em; color: var(--cream);
+  font-size: 50px; line-height: 66px; letter-spacing: -0.01em; color: var(--text);
 }
 .welcome-meal .word { position: absolute; left: 0; right: 0; top: 0; opacity: 0; }
 .welcome-actions { display: flex; gap: 12px; width: min(100%, 340px); }
 .welcome-actions button { flex: 1; min-height: 56px; font-size: 18px; padding: 10px 12px; }
-.welcome-actions button:not(.primary) { border-color: var(--cream); }
+.welcome-actions button:not(.primary) { border-color: var(--text); }
 
 /* ---- search ---- */
 
@@ -369,7 +381,7 @@ ul.ingredients:has(.ing) li::before { top: calc(50% - 3px); }
   display: grid; grid-template-rows: minmax(0, 1fr) auto; justify-items: center; align-items: center; row-gap: 4px;
   text-align: center; text-decoration: none;
   min-width: 0;
-  background: var(--cream); color: var(--ink);
+  background: var(--tile-bg, var(--card)); color: var(--ink);
   box-shadow: var(--shadow-card);
   transition: transform var(--t-press) var(--ease), box-shadow var(--t-press) ease;
 }
@@ -400,17 +412,17 @@ ul.ingredients:has(.ing) li::before { top: calc(50% - 3px); }
 
 /* Each tint names the icon colour for the kind of dish; tiles, the plate and
    the plan's little cards use it. */
-.tint-yellow { --tile-fg: var(--yellow-fg); }
-.tint-green { --tile-fg: var(--green-fg); }
-.tint-blue { --tile-fg: var(--blue-fg); }
-.tint-orange { --tile-fg: var(--orange-fg); }
-.tint-olive { --tile-fg: var(--olive-fg); }
-.tint-plum { --tile-fg: var(--plum-fg); }
-.tint-pink { --tile-fg: var(--pink-fg); }
-.tint-brown { --tile-fg: var(--brown-fg); }
-.tint-teal { --tile-fg: var(--teal-fg); }
-.tint-red { --tile-fg: var(--red-fg); }
-.tint-gray { --tile-fg: var(--gray-fg); }
+.tint-yellow { --tile-fg: var(--yellow-fg); --tile-bg: var(--yellow-bg); }
+.tint-green { --tile-fg: var(--green-fg); --tile-bg: var(--green-bg); }
+.tint-blue { --tile-fg: var(--blue-fg); --tile-bg: var(--blue-bg); }
+.tint-orange { --tile-fg: var(--orange-fg); --tile-bg: var(--orange-bg); }
+.tint-olive { --tile-fg: var(--olive-fg); --tile-bg: var(--olive-bg); }
+.tint-plum { --tile-fg: var(--plum-fg); --tile-bg: var(--plum-bg); }
+.tint-pink { --tile-fg: var(--pink-fg); --tile-bg: var(--pink-bg); }
+.tint-brown { --tile-fg: var(--brown-fg); --tile-bg: var(--brown-bg); }
+.tint-teal { --tile-fg: var(--teal-fg); --tile-bg: var(--teal-bg); }
+.tint-red { --tile-fg: var(--red-fg); --tile-bg: var(--red-bg); }
+.tint-gray { --tile-fg: var(--gray-fg); --tile-bg: var(--gray-bg); }
 
 .list { margin-top: 4px; }
 .item {
@@ -435,12 +447,12 @@ ul.ingredients:has(.ing) li::before { top: calc(50% - 3px); }
 .meal-pick { position: relative; display: inline-flex; align-items: center; gap: 14px; max-width: 100%; margin: 4px 0 6px; cursor: pointer; }
 .meal-name {
   font-family: var(--display); font-weight: 400; font-synthesis: none;
-  font-size: var(--fs-3xl); line-height: 1.08; letter-spacing: -0.015em; color: var(--cream);
+  font-size: var(--fs-3xl); line-height: 1.08; letter-spacing: -0.015em; color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 4px;
 }
 .meal-chevron {
   flex: none; width: 40px; height: 40px; border-radius: 50%; margin-top: 10px;
-  border: 1.5px solid rgba(212, 168, 75, 0.55);
+  border: 1.5px solid color-mix(in srgb, var(--brass) 55%, transparent);
   display: inline-flex; align-items: center; justify-content: center;
 }
 .meal-chevron::before {
@@ -462,7 +474,7 @@ ul.ingredients:has(.ing) li::before { top: calc(50% - 3px); }
   border: none; border-radius: 0; background: none; box-shadow: none;
   min-height: 48px; padding: 8px 0; font-size: 18px; font-weight: 500; color: var(--cream-3);
 }
-.effort-switch button[aria-pressed=true] { color: var(--cream); font-weight: 700; }
+.effort-switch button[aria-pressed=true] { color: var(--text); font-weight: 700; }
 .effort-switch button[aria-pressed=true]::after {
   content: ''; position: absolute; left: 0; right: 0; bottom: 4px; height: 2.5px;
   border-radius: 2px; background: var(--brass);
@@ -476,7 +488,7 @@ ul.ingredients:has(.ing) li::before { top: calc(50% - 3px); }
 .hero-card {
   position: relative;
   display: flex; align-items: center; gap: 18px;
-  color: var(--cream); text-decoration: none;
+  color: var(--text); text-decoration: none;
   transition: transform var(--t-press) var(--ease);
 }
 .hero-card:active { transform: scale(0.985); }
@@ -488,7 +500,7 @@ ul.ingredients:has(.ing) li::before { top: calc(50% - 3px); }
   color: var(--tile-fg, var(--ink));
   stroke-width: 1.4;
   background: radial-gradient(circle, var(--plate) 0 52%, var(--plate-ring) 53% 58%, var(--plate) 59% 100%);
-  box-shadow: 0 0 0 5px rgba(212, 168, 75, 0.2), 0 18px 40px -12px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--brass) 20%, transparent), 0 18px 40px -12px rgba(0, 0, 0, 0.55);
 }
 .hero-text { display: block; min-width: 0; }
 .hero-kicker {
@@ -535,7 +547,7 @@ h2.section.side-heading { font-size: 21px; margin-top: 36px; margin-bottom: var(
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
   padding-bottom: env(safe-area-inset-bottom);
   background: var(--leaf-deep);
-  border-top: 1px solid rgba(212, 168, 75, 0.3);
+  border-top: 1px solid color-mix(in srgb, var(--brass) 30%, transparent);
   box-shadow: 0 -10px 24px -14px rgba(0, 0, 0, 0.55);
   transition: opacity 0.4s ease;
 }
@@ -578,7 +590,7 @@ body.welcome-open .tabs { opacity: 0; visibility: hidden; transition: none; }
   position: fixed; left: 50%; transform: translateX(-50%);
   bottom: calc(var(--nav-h) + 14px + env(safe-area-inset-bottom));
   z-index: 20; width: max-content; max-width: calc(100% - 32px);
-  background: var(--cream); color: var(--ink);
+  background: var(--card); color: var(--ink);
   padding: 13px 18px; border-radius: var(--r-md); font-size: 16px; font-weight: 500; line-height: 1.4;
   box-shadow: var(--shadow-float);
   animation: toast-in 0.3s var(--ease);
@@ -597,6 +609,50 @@ body.no-tabs .toast, body.welcome-open .toast { bottom: calc(24px + env(safe-are
 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
+/* ---- Recipes: one search box, one row of shortcuts, one "What do you have?" ---- */
+
+/* The search box, with a quiet magnifier inside on the left. */
+.search-box { position: relative; margin-top: var(--s4); }
+.search-box input { padding-left: 44px; padding-right: 12px; }
+.search-box input::placeholder { font-size: 16px; }
+.search-box .search-icon {
+  position: absolute; left: 13px; top: 50%; width: 22px; height: 22px; margin-top: -11px;
+  color: var(--cream-3); stroke-width: 1.7; pointer-events: none;
+}
+
+/* All · Naadan · One pot · Loved · To try: plain words like the Plan day
+   strip (the rules are shared with .day-strip, under the Plan tab). */
+
+/* "What do you have?": an outlined button with coral words and a chevron
+   that turns when the chips are open. */
+.have { margin-top: var(--s2); }
+.have-btn {
+  min-height: 48px; padding: 8px 14px 8px 16px; gap: 6px;
+  border: 1.5px solid var(--brass); color: var(--brass); background: transparent;
+  font-size: 17px; font-weight: 600;
+}
+.have-chevron { width: 20px; height: 20px; flex: none; stroke-width: 1.8; transition: transform var(--t-press) var(--ease); }
+.have-btn[aria-expanded=true] .have-chevron { transform: rotate(180deg); }
+/* "With prawns · roast   Clear": what she picked, open or shut. */
+.have-summary { display: flex; flex-wrap: wrap; align-items: center; column-gap: 16px; margin: 4px 0 0; font-size: 16.5px; }
+.have-picked { font-weight: 600; overflow-wrap: anywhere; }
+.link-btn.have-clear { min-height: 44px; padding: 6px 0; font-size: 16px; }
+/* The chips, on a plain white card under the button. */
+.have-panel {
+  margin-top: var(--s3); padding: var(--s4);
+  background: var(--leaf-raised); border: 1px solid var(--hairline); border-radius: var(--r-lg);
+}
+.have-panel .pick { margin: 0; }
+
+/* The list's quiet headings by kind of meal: "Breakfast  51". */
+.squares .group-head {
+  grid-column: 1 / -1; display: flex; align-items: baseline; gap: 10px;
+  margin: var(--s5) 0 0; font-size: 22px;
+}
+.squares .group-head:first-child { margin-top: var(--s4); }
+.group-head .count { font-family: var(--sans); font-size: var(--fs-sm); font-weight: 600; color: var(--cream-3); font-variant-numeric: tabular-nums; }
+.squares .look-all { grid-column: 1 / -1; justify-self: start; }
+
 /* ---- Recipes: tap instead of typing, "I have" labels and a "Make it" bar ---- */
 .pick { margin: var(--s4) 0 4px; }
 .pick-label {
@@ -610,11 +666,10 @@ body.no-tabs .toast, body.welcome-open .toast { bottom: calc(24px + env(safe-are
 .chip.tag {
   min-height: 44px; padding: 6px 14px;
   border: 1px solid var(--line-strong); border-radius: var(--r-sm);
-  background: transparent; color: var(--cream); box-shadow: none;
+  background: transparent; color: var(--text); box-shadow: none;
   font-size: 16px; font-weight: 500; white-space: nowrap;
 }
 .chip.tag[aria-pressed=true] { background: var(--brass); border-color: var(--brass); color: var(--on-brass); font-weight: 700; }
-.chip.clear { border: none; background: none; box-shadow: none; min-height: 44px; padding: 6px 6px; color: var(--brass); font-size: 16px; font-weight: 600; }
 
 /* How she wants it: one split bar. */
 .style-bar button.style-seg { font-size: 16px; }
@@ -690,24 +745,27 @@ h1.dish-title + .muted { font-size: var(--fs-sm); letter-spacing: 0.02em; margin
 /* Today, Tomorrow, Sat 11…: a row of plain words; the chosen day in cream
    with a brass line under it, like the Quick & easy switch. A small brass dot
    marks a day that has dishes on it. Only the row scrolls sideways. */
-.day-strip {
+.day-strip, .shortcuts {
   display: flex; gap: 4px; overflow-x: auto;
   margin: 2px calc(-1 * var(--gutter)) 4px; padding: 0 calc(var(--gutter) - 12px) 4px;
   scrollbar-width: none; overscroll-behavior-x: contain;
 }
-.day-strip::-webkit-scrollbar { display: none; }
-.day-strip button {
+.day-strip::-webkit-scrollbar, .shortcuts::-webkit-scrollbar { display: none; }
+.day-strip button, .shortcuts button {
   flex: none; position: relative;
   min-height: 48px; padding: 8px 12px;
   border: none; border-radius: var(--r-sm); background: none; box-shadow: none;
   font-size: 17px; font-weight: 500; color: var(--cream-3); white-space: nowrap;
 }
-.day-strip button:active { transform: none; background: rgba(244, 235, 214, 0.06); }
-.day-strip button[aria-pressed=true] { color: var(--cream); font-weight: 700; }
-.day-strip button[aria-pressed=true]::after {
+.day-strip button:active, .shortcuts button:active { transform: none; background: color-mix(in srgb, var(--text) 6%, transparent); }
+.day-strip button[aria-pressed=true], .shortcuts button[aria-pressed=true] { color: var(--text); font-weight: 700; }
+.day-strip button[aria-pressed=true]::after, .shortcuts button[aria-pressed=true]::after {
   content: ''; position: absolute; left: 12px; right: 12px; bottom: 6px; height: 2.5px;
   border-radius: 2px; background: var(--brass);
 }
+div.shortcuts { margin-top: var(--s2); margin-bottom: 0; }
+.shortcuts button { padding-left: 10px; padding-right: 10px; }
+.shortcuts button[aria-pressed=true]::after { left: 10px; right: 10px; }
 /* "Pick a date": an outlined brass button on the "Meal plan" line (and
    under the days in "Move to"). The phone's own calendar opens from a date
    field laid invisibly over it, so a tap anywhere on it works. */
@@ -716,12 +774,12 @@ h1.dish-title + .muted { font-size: var(--fs-sm); letter-spacing: 0.02em; margin
 .day-pick {
   flex: none; position: relative; display: inline-flex; align-items: center; gap: 8px;
   min-height: 48px; padding: 8px 14px;
-  border: 1px solid rgba(212, 168, 75, 0.55); border-radius: var(--r-md);
+  border: 1px solid color-mix(in srgb, var(--brass) 55%, transparent); border-radius: var(--r-md);
   font-size: 17px; font-weight: 600; color: var(--brass); white-space: nowrap; cursor: pointer;
 }
 .chooser .day-pick { margin: 4px 0 12px; }
 .day-pick .icon { width: 20px; height: 20px; }
-.day-pick:active { background: rgba(244, 235, 214, 0.06); }
+.day-pick:active { background: color-mix(in srgb, var(--text) 6%, transparent); }
 .day-pick input[type=date] {
   position: absolute; inset: 0; width: 100%; height: 100%;
   opacity: 0; border: 0; padding: 0; margin: 0; cursor: pointer;
@@ -750,12 +808,12 @@ h1.dish-title + .muted { font-size: var(--fs-sm); letter-spacing: 0.02em; margin
 .plan-dish-link {
   flex: 1; min-width: 0;
   display: flex; align-items: center; gap: 14px;
-  padding: 10px 0; color: var(--cream); text-decoration: none; font-size: 17px; font-weight: 500;
+  padding: 10px 0; color: var(--text); text-decoration: none; font-size: 17px; font-weight: 500;
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
 }
 .plan-icon {
   flex: none; width: 46px; height: 46px; border-radius: var(--r-md); display: grid; place-items: center;
-  background: var(--cream); color: var(--tile-fg, var(--ink));
+  background: var(--tile-bg, var(--card)); color: var(--tile-fg, var(--ink));
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 .plan-icon .icon { width: 27px; height: 27px; }
@@ -782,7 +840,7 @@ h1.dish-title + .muted { font-size: var(--fs-sm); letter-spacing: 0.02em; margin
   color: var(--cream-2); font-size: var(--fs-sm);
 }
 .plan-line a {
-  color: var(--cream); font-weight: 600; text-decoration: underline; text-decoration-color: rgba(212, 168, 75, 0.6);
+  color: var(--text); font-weight: 600; text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--brass) 60%, transparent);
   text-underline-offset: 3px; text-decoration-thickness: 1px;
 }
 .plan-line .times { margin-left: 3px; color: var(--brass); font-weight: 700; }
@@ -817,15 +875,15 @@ h2.section.pick-heading { margin-top: var(--s5); margin-bottom: var(--s3); font-
 .pick-count { margin: 14px 0 6px; }
 
 /* Picker tiles are buttons that look like the usual tiles. */
-button.square { border: none; min-height: 0; font: inherit; width: 100%; height: auto; cursor: pointer; background: var(--cream); color: var(--ink); }
-button.square:active { background: var(--cream); }
+button.square { border: none; min-height: 0; font: inherit; width: 100%; height: auto; cursor: pointer; background: var(--tile-bg, var(--card)); color: var(--ink); }
+button.square:active { background: var(--tile-bg, var(--card)); }
 button.square .name { font-size: 14.5px; font-weight: 600; }
 /* On the plan: a brass ring round the card and a badge (✓, ×2, ×3). */
 .square .picked {
   position: absolute; top: 6px; right: 6px;
   min-width: 28px; height: 28px; padding: 0 7px; border-radius: 14px;
   display: none; place-items: center;
-  background: var(--leaf); color: var(--cream);
+  background: var(--leaf); color: var(--text);
   font-size: 14px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
   box-shadow: 0 0 0 2px var(--brass);
 }
@@ -839,7 +897,7 @@ button.square .name { font-size: 14.5px; font-weight: 600; }
   width: 44px; height: 44px; min-height: 0; padding: 0;
   display: grid; place-items: center;
   border: none; background: none; box-shadow: none; border-radius: var(--r-lg);
-  color: var(--cream);
+  color: var(--text);
 }
 .pick-less span {
   width: 30px; height: 30px; border-radius: 50%;
@@ -890,19 +948,30 @@ button.square .name { font-size: 14.5px; font-weight: 600; }
 }
 .chooser-keep { font-size: 16px; }
 
+/* "Naadan · One pot" under a dish's name, and the two toggles when editing or adding. */
+.collections-line { margin: -4px 0 var(--s2); font-size: var(--fs-sm); letter-spacing: 0.02em; }
+/* Columns as wide as their words need, so "One pot / bachelor" stays on one line. */
+.tag-buttons { grid-template-columns: repeat(2, auto); margin-top: 0; }
+.tag-buttons button { line-height: 1.2; padding: 6px 8px; }
+
 /* ---- "Shows in: Lunch, Dinner · Change" on a recipe ---- */
 .meals-line { margin: 0 0 var(--s2); font-size: var(--fs-sm); }
 .meals-line .inline-link { text-decoration: none; display: inline-block; min-height: 44px; line-height: 44px; margin: -12px 0; padding: 0 4px; }
 .meals-edit { margin: 0 0 var(--s4); }
 .meals-reset { font-size: 16px; }
-#r-made + .btn.primary, #r-picture + h1 + .muted + .btn.primary { margin-top: var(--s3); }
+#r-made + .btn.primary, #r-picture + h1 + .muted + .btn.primary, #r-picture + h1 + .muted + .collections-line + .btn.primary { margin-top: var(--s3); }
 
-/* ---- guest mode: the family link's welcome, and the signed-out notices ---- */
+/* ---- signed out: the welcome (name + family code), and #signin ---- */
 .join-title {
   margin: 8px 0 10px;
   font-size: 56px; line-height: 1.04; letter-spacing: -0.015em;
 }
 .join-text { color: var(--cream-2); font-size: var(--fs-md); }
+.welcome-family .join-go { margin-top: var(--s5); }
+#j-code { letter-spacing: 0.04em; }
+/* "Family? Continue as guest" under the #signin form: quiet, but a big enough tap. */
+.member-ask { margin: var(--s6) 0 0; padding-top: var(--s4); border-top: 1px solid var(--hairline); text-align: center; color: var(--cream-2); font-size: 17px; }
+.member-ask .inline-link { display: inline-block; min-height: 48px; line-height: 48px; padding: 0 4px; margin: -8px 0; }
 
 /* Visitors · Sign out at the bottom of Today */
 .footer-links { display: flex; flex-wrap: wrap; justify-content: center; column-gap: 28px; padding-top: var(--s3); border-top: 1px solid var(--hairline); }
@@ -918,10 +987,20 @@ button.square .name { font-size: 14.5px; font-weight: 600; }
 .visitor-name { font-weight: 700; overflow-wrap: anywhere; }
 .visitor-sub { font-size: 14.5px; color: var(--cream-2); }
 .visitor-remove { flex: none; font-size: 16px; }
-.family-link { font-size: 15px; color: var(--cream-2); }
-.link-actions { margin-top: 10px; }
-.link-note { margin: 12px 0 0; }
-.new-link { display: block; margin-top: 8px; font-size: 16px; }
+/* The family code itself: big, plain and easy to read out over the phone. */
+.family-code {
+  margin: 0; padding: 18px 20px;
+  background: var(--leaf-raised); border-radius: var(--r-xl); box-shadow: var(--shadow-raised);
+  font-size: 30px; line-height: 1.25; font-weight: 700; letter-spacing: 0.04em; color: var(--text);
+  overflow-wrap: anywhere; text-align: center;
+}
+.link-actions { margin-top: var(--s3); }
+.change-code { margin-top: var(--s3); }
+.code-form { margin-top: var(--s2); }
+.code-form label.field { margin-top: var(--s3); }
+.link-note { margin: 14px 0 0; }
+.new-link { display: block; margin-top: 4px; font-size: 16px; color: var(--cream-2); }
+.signin-note { margin: var(--s6) 0 0; padding-top: var(--s3); border-top: 1px solid var(--hairline); overflow-wrap: anywhere; }
 
 /* ---- motion: calm only ---- */
 @media (prefers-reduced-motion: reduce) {
@@ -940,13 +1019,13 @@ button.square .name { font-size: 14.5px; font-weight: 600; }
 .recipe-top .back-btn { margin: 0 0 0 -12px; }
 .edit-btn {
   min-height: 44px; margin: 0; padding: 6px 14px;
-  border: 1px solid rgba(212, 168, 75, 0.45); border-radius: var(--r-md);
+  border: 1px solid color-mix(in srgb, var(--brass) 45%, transparent); border-radius: var(--r-md);
   background: none; box-shadow: none; gap: 8px;
   color: var(--brass); font-size: 17px; font-weight: 600;
 }
 .edit-btn .icon { width: 20px; height: 20px; }
-.edit-btn:active { background: rgba(244, 235, 214, 0.06); transform: none; }
-.recipe-notes { white-space: pre-line; color: var(--cream); margin: 0 0 var(--s3); }
+.edit-btn:active { background: color-mix(in srgb, var(--text) 6%, transparent); transform: none; }
+.recipe-notes { white-space: pre-line; color: var(--text); margin: 0 0 var(--s3); }
 /* Editing: the fields, then Save and Cancel side by side. */
 .edit-meals { margin-top: var(--s5); }
 .edit-actions { display: flex; gap: 10px; margin-top: 24px; }

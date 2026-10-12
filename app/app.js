@@ -78,14 +78,19 @@ const state = {
   // supabase-js's own session so the app (and Yo Mom) can open straight away,
   // even offline, before supabase-js has checked the session.
   user: store.get('user', null),
-  // A family member who came in through the family link (an anonymous
+  admin: store.get('admin', false), // Sharon: the only one who sees Visitors and the family code
+  // A family member who came in with the family code (an anonymous
   // sign-in): { id, name }. Null for Mom and Sharon. state.user is then their id.
   guest: store.get('guest', null),
   recipes: store.get('recipes', []),
   loadedAt: 0,
   loading: false,
   extraCategories: store.get('extraCategories', []),
-  filters: { q: '', status: 'all', category: '', showRemoved: false },
+  // The Recipes tab. collection (a COLLECTIONS key) and status are set by the
+  // shortcut row, one at a time; '' and 'all' mean everything. category is no
+  // longer chosen on screen and stays ''.
+  filters: { q: '', status: 'all', category: '', collection: '', showRemoved: false },
+  haveOpen: false, // the "What do you have?" chips are open on the Recipes tab
   // Today's meal and Quick & easy / Gourmet. mealSlot is the time-of-day meal
   // when `meal` was set, so it moves on by itself when lunchtime becomes dinner.
   meal: null,
@@ -110,12 +115,12 @@ const state = {
   fromWelcomeRow: null, // the dish she tapped on the first page, until its page opens
   mealsOpen: null, // the recipe whose "Shows in" meal toggles are open
   editing: null, // the recipe whose Edit form is open; otherwise its page is read-only
-  notice: null, // a message shown instead of the sign-in form: { title, text }
+  notice: null, // a message shown at the top of the welcome screen instead of its usual words: { title, text }
   joinPending: '', // a family code from a link opened while a guest was signed in
-  visitors: null, // the Visitors page: { guests, counts, code, fresh, error }
+  visitors: null, // the Visitors page: { guests, counts, code, error, changing (the Change code box is open), codeError }
 };
 
-/** True when a family member is using the app through the family link. */
+/** True when a family member is using the app as a guest (came in with the family code). */
 const isGuest = () => !!(state.guest && state.guest.id);
 const guestId = () => (state.guest ? state.guest.id : null);
 /** A recipe this guest added themselves (Mom's have no owner). */
@@ -129,11 +134,29 @@ const canEdit = r => (isGuest() ? isMine(r) : !r.owner);
 // name means the screens, the welcome tiles and #recipe/<row> links didn't
 // have to change. Ids never shift, unlike sheet rows.
 
-const COLUMNS = 'id, name, category, status, link, source, notes, ingredients, last_cooked_at, photo_path, effort, meals, owner';
+const COLUMNS = 'id, name, category, status, link, source, notes, ingredients, last_cooked_at, photo_path, effort, meals, tags, owner';
 // What a guest asks for on Mom's recipes: everything but her private notes.
 // (The rules are per row, so the notes could still be asked for; the app just never does.)
 const FAMILY_COLUMNS = COLUMNS.replace(', notes', '');
-const EDITABLE = ['name', 'category', 'status', 'notes', 'ingredients', 'last_cooked_at', 'photo_path', 'meals'];
+const EDITABLE = ['name', 'category', 'status', 'notes', 'ingredients', 'last_cooked_at', 'photo_path', 'meals', 'tags'];
+
+// The collections she can browse on the Recipes tab (recipes.tags, migration
+// 008). A dish can be in either, both or neither. `key` is what's saved.
+const COLLECTIONS = [
+  { key: 'naadan', name: 'Naadan', heading: 'Naadan dishes', about: 'Kerala home-style', toggle: 'Naadan', icon: 'leaf', tint: 'green' },
+  { key: 'onepot', name: 'One pot', heading: 'One pot meals', about: 'Easy, one-pot meals', toggle: 'One pot / bachelor', icon: 'soup', tint: 'yellow' },
+];
+const collectionOf = key => COLLECTIONS.find(c => c.key === key) || null;
+
+/** Lowercase, no repeats, known collections first in their usual order; unknown keys are kept. */
+function tidyTags(list) {
+  const keys = [...new Set((Array.isArray(list) ? list : []).map(t => String(t ?? '').trim().toLowerCase()).filter(Boolean))];
+  const known = COLLECTIONS.map(c => c.key).filter(k => keys.includes(k));
+  return [...known, ...keys.filter(k => !collectionOf(k))];
+}
+/** A recipe's collection keys (a copy saved on the phone by an older version has none). */
+const tagsOf = r => (r && Array.isArray(r.tags) ? r.tags : []);
+const inCollection = (r, key) => tagsOf(r).includes(key);
 const PAGE = 1000; // Supabase sends at most 1000 rows per request.
 
 /** False until app/config.js has the real project URL and key. */
@@ -180,6 +203,7 @@ function fromDb(d) {
     effort: d.effort || '', // 'quick', 'gourmet', 'storage', or '' for everyday; not editable yet
     // The meals it shows in, when chosen on its page; null follows the category (mealsOf).
     meals: Array.isArray(d.meals) && d.meals.length ? d.meals : null,
+    tags: tidyTags(d.tags), // its collections ('naadan', 'onepot'), or [] for none
     owner: d.owner || null, // null for Mom's recipes; the guest's id for one a guest added
   };
 }
@@ -260,6 +284,7 @@ async function addRecipe(recipe, force) {
     link_key: key,
     source: sourceFor(link),
     notes: clean(recipe.notes),
+    ...(tidyTags(recipe.tags).length ? { tags: tidyTags(recipe.tags) } : {}),
   };
   return { duplicate: false, recipe: fromDb(await query(db().from('recipes').insert(row).select(COLUMNS).single())) };
 }
@@ -313,6 +338,12 @@ async function updateRecipe(recipe, fields) {
     }
     if (f === 'photo_path') {
       changes[f] = clean(fields[f]) || null;
+      continue;
+    }
+    if (f === 'tags') {
+      // Collection keys; none is saved as null, like meals.
+      const list = tidyTags(fields[f]);
+      changes[f] = list.length ? list : null;
       continue;
     }
     if (f === 'meals') {
@@ -846,6 +877,24 @@ function setMember(email) {
   state.notice = null;
   store.set('user', state.user);
   store.remove('guest');
+  refreshAdmin();
+}
+
+/**
+ * Asks the database whether the signed-in person is Sharon (allowed_users.admin).
+ * Only she sees Visitors and the family code; Mom doesn't. Offline, or before
+ * migration 010, the phone keeps what it last knew.
+ */
+async function refreshAdmin() {
+  if (!state.user || isGuest()) return;
+  try {
+    const admin = !!(await query(db().rpc('is_admin')));
+    if (admin === state.admin) return;
+    state.admin = admin;
+    store.set('admin', admin);
+    state.visitors = null; // what the page may show has changed
+    if (location.hash === '#today' || location.hash === '' || location.hash === '#visitors') render();
+  } catch (e) { /* keep what this phone knew */ }
 }
 
 function setGuest(id, name) {
@@ -857,13 +906,17 @@ function setGuest(id, name) {
 }
 
 // ---------- guest mode ----------
-// Family members open the family link (…/#join=<code>), type their name and
-// come in as a Supabase anonymous user: no email, no password. join_family()
-// checks the code and puts them on the guest list (supabase/migrations/005).
-// The sign-in stays on their phone like anyone else's.
+// Family members open the plain address, type their name and the secret
+// family code, and come in as a Supabase anonymous user: no email, no
+// password. join_family() checks the code and puts them on the guest list
+// (supabase/migrations/005 and 009). The sign-in stays on their phone like
+// anyone else's. Old family links (…/#join=<code>) still work: the code comes
+// from the link and they only type their name.
 
-const EXPIRED = { title: 'Welcome!', text: 'This link has expired. Ask Sharon for a new one.' };
-const GUEST_ENDED = { title: 'Welcome back', text: 'Guest mode has ended on this phone. Ask Sharon for a new family link.' };
+const GUEST_ENDED = { title: 'Welcome back', text: 'Guest mode has ended on this phone. Ask Sharon for the family code.' };
+const WRONG_CODE = 'That family code isn’t right. Ask Sharon for it.';
+const OLD_LINK = 'This family link is old. Ask Sharon for the family code.';
+const CODE_MIN = 6, CODE_MAX = 40; // what set_family_code() accepts (009_family_code.sql)
 
 /** The family code in a #join=<code> link, or ''. */
 function joinCodeFrom(hash) {
@@ -871,10 +924,13 @@ function joinCodeFrom(hash) {
   return m ? m[1] : '';
 }
 
+/** A family code the way the database compares it: lowercase, no spaces at the ends, single spaces inside. */
+const cleanCode = code => String(code || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
 let joining = false; // checkSession waits while a join is half done
 let touched = false; // touch_guest() once per app open
 
-/** Signs in as a new anonymous user and joins with the code. Throws Error('expired') for a bad code. */
+/** Signs in as a new anonymous user and joins with the code. Throws Error('wrong-code') for a bad code. */
 async function joinFamily(code, name) {
   joining = true;
   try {
@@ -882,14 +938,14 @@ async function joinFamily(code, name) {
     if (error) throw error;
     let ok = false;
     try {
-      ok = await query(db().rpc('join_family', { code, name }));
+      ok = await query(db().rpc('join_family', { code: cleanCode(code), name }));
     } catch (e) {
       await db().auth.signOut({ scope: 'local' }).catch(() => {});
       throw e;
     }
     if (!ok) {
       await db().auth.signOut({ scope: 'local' }).catch(() => {});
-      throw new Error('expired');
+      throw new Error('wrong-code');
     }
     setGuest(data.user.id, name);
     touched = true; // joining counts as this open's visit
@@ -911,14 +967,15 @@ function joinMessage(e) {
 
 /**
  * The guest isn't on the list any more (Sharon removed them): forget them on
- * this phone. With a family link waiting, go straight to its welcome.
+ * this phone and say so on the welcome screen. With a family link waiting,
+ * go straight to its welcome instead.
  */
 async function guestEnded() {
   const code = state.joinPending;
   state.joinPending = '';
   try { await db().auth.signOut({ scope: 'local' }); } catch (e) { /* offline: forget it here anyway */ }
+  state.notice = code ? null : GUEST_ENDED; // before signedOut(), which draws the welcome
   signedOut();
-  state.notice = code ? null : GUEST_ENDED;
   history.replaceState({ idx: nav.idx }, '', location.pathname + (code ? `#join=${code}` : '#today'));
   nav.hashes[nav.idx] = location.hash;
   render();
@@ -963,6 +1020,8 @@ function signedOut() {
   const was = state.user;
   state.user = null;
   state.guest = null;
+  state.admin = false;
+  store.remove('admin');
   state.visitors = null;
   state.mealsOpen = null;
   state.recipes = [];
@@ -1438,7 +1497,8 @@ function todayPlanHtml() {
 
 /**
  * A quiet "Sign out" at the bottom of Today, out of the way of the meal, with
- * "Visitors" next to it for Mom and Sharon. A guest gets "Leave guest mode".
+ * "Visitors" next to it for Sharon ("Family code" for Mom: the code, not who came in).
+ * A guest gets "Leave guest mode".
  */
 function signOutHtml() {
   if (isGuest()) {
@@ -1447,7 +1507,7 @@ function signOutHtml() {
     </div>`;
   }
   return `<div class="footer-action footer-links">
-    <button class="link-btn sign-out" data-action="visitors">Visitors</button>
+    <button class="link-btn sign-out" data-action="visitors">${state.admin ? 'Visitors' : 'Family code'}</button>
     <button class="link-btn sign-out" data-action="sign-out">Sign out${state.user ? ` (${esc(state.user)})` : ''}</button>
   </div>`;
 }
@@ -1722,13 +1782,14 @@ function missingTerms(r, terms) {
 /**
  * The recipes to show for the current filters and search box, with how well
  * each matches when it's an ingredient search: { mode, terms, items: [{ r, match }] }.
+ * `f` is the filters to follow (the Recipes tab passes shownFilters()).
  */
-function runSearch() {
-  const f = state.filters;
+function runSearch(f = state.filters) {
   const list = state.recipes.filter(r => {
     if (f.showRemoved !== isRemoved(r)) return false;
     if (!f.showRemoved && f.status !== 'all' && statusOf(r) !== f.status) return false;
     if (f.category && categoryOf(r) !== f.category) return false;
+    if (!f.showRemoved && f.collection && !inCollection(r, f.collection)) return false;
     return true;
   });
 
@@ -1740,17 +1801,31 @@ function runSearch() {
   const terms = searchTerms(f.q);
   const several = terms.length > 1;
   const items = [];
-  // Dishes missing just one of her ingredients ("2 of 3 · no cream"). Kept
-  // apart and hidden behind a button: she wants exact answers first.
+  // Dishes missing just one thing she asked for, kept apart and hidden behind
+  // a button: she wants exact answers first. Never a dish that needs a protein
+  // she didn't list: if she has prawns and no chicken, "chicken roast" is no
+  // help however close it is. So a close match misses the style ("prawns,
+  // roast" -> her other prawns dishes), a smaller ingredient ("no cream"), or
+  // one of two proteins she has (prawns and chicken -> a prawns-only dish).
   const close = [];
+  const hasProteins = terms.filter(isProtein);
+  // With proteins in her list, a close match uses at least one of them and no other.
+  const proteinsOk = r => {
+    if (!hasProteins.length) return true;
+    const uses = dishProteins(r);
+    return uses.length > 0 && uses.every(p => hasProteins.includes(p));
+  };
   for (const r of list) {
     const missing = missingTerms(r, terms);
     if (!missing.length) items.push({ r, match: null });
-    else if (several && missing.length === 1) close.push({ r, match: { have: terms.length - 1, of: terms.length, missing: missing[0] } });
+    else if (several && missing.length === 1 && proteinsOk(r)) {
+      close.push({ r, match: { have: terms.length - 1, of: terms.length, missing: missing[0], style: !!STYLES[missing[0]] } });
+    }
   }
   const newestFirst = (a, b) => b.r.row - a.r.row;
   items.sort(newestFirst);
-  close.sort(newestFirst);
+  // The same ingredients in another style first ("other prawns dishes"), then the rest.
+  close.sort((a, b) => (b.match.style - a.match.style) || newestFirst(a, b));
   return { mode: several ? 'ingredients' : 'text', terms, items, close };
 }
 
@@ -1759,6 +1834,17 @@ function runSearch() {
 // so tapping gives exactly the same results as typing it.
 
 const PROTEINS = ['chicken', 'mutton', 'beef', 'pork', 'fish', 'prawns', 'egg', 'paneer'];
+
+/** A search term that's one of the proteins (in its simple form, so "prawns" and "chemmeen" count). */
+function isProtein(term) {
+  return PROTEINS.some(p => simpleWord(p) === term);
+}
+
+/** The proteins a dish uses, from its name and ingredients, in their simple form ("prawn"). */
+function dishProteins(r) {
+  const text = simplePhrase([r.name, ...r.ingredients].join(' , '));
+  return PROTEINS.map(simpleWord).filter(p => hasPhrase(text, p));
+}
 const STYLE_CHIPS = ['gravy', 'roast', 'fry', 'kebab'];
 const CHIP_EXTRAS = ['cream', 'cashew', 'coconut', 'tomato'];
 
@@ -1797,25 +1883,25 @@ function styleWordHtml(term) {
 function chipsHtml() {
   return `<div class="pick">
     <p class="pick-label">I have</p>
-    <div class="tags" role="group" aria-label="Ingredients you have">${ingredientChips().map(tagHtml).join('')}
-      <button type="button" class="chip clear" data-action="chip-clear" hidden>Clear</button>
-    </div>
+    <div class="tags" role="group" aria-label="Ingredients you have">${ingredientChips().map(tagHtml).join('')}</div>
     <p class="pick-label">Make it</p>
     <div class="segmented style-bar" role="group" aria-label="Kind of dish">${STYLE_CHIPS.map(styleWordHtml).join('')}</div>
   </div>`;
 }
 
-/** Lights up the chips whose word is in the box, whether tapped or typed. */
+/** Lights up the chips whose word is in the box, whether tapped or typed, and says what's picked under "What do you have?". */
 function markChips() {
   const inBox = new Set(searchParts(state.filters.q).map(simplePhrase));
-  let any = false;
   document.querySelectorAll('.chip[data-chip]').forEach(c => {
-    const on = inBox.has(simplePhrase(c.dataset.chip));
-    c.setAttribute('aria-pressed', on);
-    any = any || on;
+    c.setAttribute('aria-pressed', inBox.has(simplePhrase(c.dataset.chip)));
   });
-  const clear = $('[data-action=chip-clear]');
-  if (clear) clear.hidden = !any;
+  const line = $('#have-summary');
+  if (!line) return;
+  const text = haveSummary();
+  if (line.dataset.text === text) return;
+  line.dataset.text = text;
+  line.hidden = !text;
+  line.innerHTML = text ? `<span class="have-picked">${esc(text)}</span><button type="button" class="link-btn have-clear" data-action="chip-clear">Clear</button>` : '';
 }
 
 /** Puts a chip's word in the search box's list, or takes it out if it's there. */
@@ -1838,67 +1924,218 @@ function andList(items) {
   return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
 }
 
+// ---------- the Recipes tab ----------
+// Top to bottom: one search box, one row of shortcuts (All · Naadan · One pot
+// · Loved · To try), one "What do you have?" button that opens the chips, and
+// the dishes. With nothing searched, the dishes sit under quiet headings by
+// kind of meal. Mom found the old screen (cards, chips, a bar and two
+// dropdowns before a single dish) too much.
+
+/** The shortcut row: one at a time, a collection, a status, or All. */
+const SHORTCUTS = [
+  { key: 'all', name: 'All', empty: 'No recipes yet.' },
+  { key: 'naadan', name: 'Naadan', collection: 'naadan', empty: 'Nothing in Naadan yet.' },
+  { key: 'onepot', name: 'One pot', collection: 'onepot', empty: 'Nothing in One pot yet.' },
+  { key: 'loved', name: 'Loved', status: STATUS.loved, empty: 'No loved recipes yet.' },
+  { key: 'totry', name: 'To try', status: STATUS.toTry, empty: 'Nothing waiting to try.' },
+];
+// Typed on its own in the search box, one of these picks its shortcut instead
+// of searching for the word.
+const SHORTCUT_WORDS = {
+  naadan: 'naadan', 'one pot': 'onepot', onepot: 'onepot', bachelor: 'onepot',
+  loved: 'loved', 'to try': 'totry', totry: 'totry',
+};
+
+/** The shortcut the search box holds ("One pot", "to try"), or '' when it's a search. */
+function typedShortcut(q) {
+  return SHORTCUT_WORDS[String(q).toLowerCase().replace(/[^a-z]+/g, ' ').trim()] || '';
+}
+
+/** The filters a shortcut stands for. */
+function shortcutFilters(key) {
+  const s = SHORTCUTS.find(x => x.key === key) || SHORTCUTS[0];
+  return { collection: s.collection || '', status: s.status || 'all' };
+}
+
+/** The shortcut the filters are on. */
+function shortcutOf(f) {
+  if (f.collection) return f.collection;
+  return f.status === STATUS.loved ? 'loved' : f.status === STATUS.toTry ? 'totry' : 'all';
+}
+
+/**
+ * The filters the list follows. While the box holds a shortcut word, the list
+ * already shows that shortcut, with nothing searched; it moves to the row
+ * when she's done typing (takeTypedShortcut).
+ */
+function shownFilters() {
+  const f = state.filters;
+  const typed = !f.showRemoved && typedShortcut(f.q);
+  return typed ? { ...f, q: '', ...shortcutFilters(typed) } : f;
+}
+
+/** The box holds a shortcut word and she's done typing: the row takes it and the box empties. */
+function takeTypedShortcut() {
+  const typed = !state.filters.showRemoved && typedShortcut(state.filters.q);
+  if (!typed) return false;
+  Object.assign(state.filters, shortcutFilters(typed), { q: '' });
+  const box = $('#search');
+  if (box) box.value = '';
+  markShortcuts();
+  return true;
+}
+
+/**
+ * All · Naadan · One pot · Loved · To try, as plain words. No counts here, so
+ * all five fit across a phone; the headings in the list have them. Only the
+ * row scrolls sideways if it ever needs to.
+ */
+function shortcutsHtml() {
+  return `<div class="shortcuts" role="group" aria-label="Show">${SHORTCUTS.map(s =>
+    `<button type="button" data-shortcut="${s.key}" aria-pressed="false">${esc(s.name)}</button>`).join('')}</div>`;
+}
+
+/** Underlines the shortcut the list is showing, typed or tapped. */
+function markShortcuts() {
+  const on = shortcutOf(shownFilters());
+  document.querySelectorAll('.shortcuts [data-shortcut]').forEach(b => b.setAttribute('aria-pressed', b.dataset.shortcut === on));
+}
+
+function pickShortcut(key) {
+  // A shortcut word still in the box gives way to the one she tapped.
+  if (typedShortcut(state.filters.q)) {
+    state.filters.q = '';
+    const box = $('#search');
+    if (box) box.value = '';
+  }
+  Object.assign(state.filters, shortcutFilters(key));
+  renderList();
+  showChosenDay($('.shortcuts'));
+}
+
+/**
+ * "What do you have?": an outlined button that opens the chips under it (no
+ * pop-up). What she's picked shows on one line under the button, open or shut.
+ */
+function haveHtml() {
+  const open = !!state.haveOpen;
+  return `<div class="have">
+    <button type="button" class="have-btn" data-action="have-toggle" aria-expanded="${open}" aria-controls="have-panel">What do you have?<svg class="have-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 9l6 6l6 -6"/></svg></button>
+    <p class="have-summary" id="have-summary" hidden></p>
+    <div class="have-panel" id="have-panel"${open ? '' : ' hidden'}>${chipsHtml()}</div>
+  </div>`;
+}
+
+function toggleHave() {
+  state.haveOpen = !state.haveOpen;
+  const b = $('[data-action=have-toggle]');
+  if (b) b.setAttribute('aria-expanded', state.haveOpen);
+  const panel = $('#have-panel');
+  if (panel) panel.hidden = !state.haveOpen;
+}
+
+/** "With prawns, coconut · roast": what she picked from the chips, or '' for nothing. */
+function haveSummary() {
+  const on = sel => [...document.querySelectorAll(`${sel}[aria-pressed=true]`)].map(c => c.dataset.chip);
+  const has = on('.chip.tag'), style = on('.chip.style-seg')[0];
+  if (!has.length) return style ? `${title(style)} dishes` : '';
+  return `With ${has.join(', ')}${style ? ` · ${style}` : ''}`;
+}
+
+// The headings over the list when nothing is searched: her categories, put
+// together by kind of meal. Anything else goes under Other.
+const RECIPE_GROUPS = [
+  { name: 'Breakfast', cats: ['Breakfast'] },
+  { name: 'Curries and mains', cats: ['Main Course', 'Lunch', 'Dinner', 'Soup'] },
+  { name: 'Sides and chutneys', cats: ['Side Dish', 'Sauce/Condiment', 'Salad'] },
+  { name: 'Snacks', cats: ['Appetizer/Snack'] },
+  { name: 'Sweets and desserts', cats: ['Sweet Snack/Mithai', 'Dessert'] },
+  { name: 'Breads and baking', cats: ['Bread/Baking', 'Bread', 'Baking'] },
+  { name: 'Drinks', cats: ['Drink/Beverage', 'Drink', 'Beverage'] },
+  { name: 'Other', cats: [] },
+];
+
+function groupOf(r) {
+  const c = categoryOf(r).toLowerCase();
+  return RECIPE_GROUPS.find(g => g.cats.some(k => k.toLowerCase() === c)) || RECIPE_GROUPS[RECIPE_GROUPS.length - 1];
+}
+
 function renderRecipes() {
   const f = state.filters;
   const removedCount = state.recipes.filter(isRemoved).length;
-  const counts = {};
-  for (const r of state.recipes) if (!isRemoved(r)) counts[categoryOf(r)] = (counts[categoryOf(r)] || 0) + 1;
-  const cats = allCategories().filter(c => counts[c]);
 
   view().innerHTML = `
     ${f.showRemoved ? backHtml('hide-removed') : ''}
     <h1>${f.showRemoved ? 'Removed' : 'Recipes'}</h1>
-    <p class="muted">${f.showRemoved ? 'Recipes you removed. They’re still saved.' : isGuest() ? 'Mom’s recipes, and the ones you add.' : 'All the recipes you’ve saved.'}</p>
+    ${f.showRemoved ? '<p class="muted">Recipes you removed. They’re still saved.</p>' : ''}
 
-    <form class="search-row" data-search-form>
+    <form class="search-box" data-search-form role="search">
       <label class="sr-only" for="search">Search</label>
-      <input id="search" type="search" enterkeyhint="search" placeholder="Search, or list what you have: tomato, chicken" value="${esc(f.q)}" autocomplete="off">
-      <button class="primary" type="submit">Search</button>
+      ${iconSvg('search', 'search-icon')}
+      <input id="search" type="search" enterkeyhint="search" placeholder="${f.showRemoved ? 'Search removed recipes' : 'Search a dish, or type what you have'}" value="${esc(f.q)}" autocomplete="off">
     </form>
-    ${f.showRemoved ? '' : `
-    ${chipsHtml()}
-    <div class="row" style="margin-top:10px">
-      <label class="sr-only" for="f-status">Status</label>
-      <select id="f-status">
-        <option value="all">Any status</option>
-        ${STATUS_OPTIONS.map(o => `<option value="${esc(o.value)}"${f.status === o.value ? ' selected' : ''}>${o.label}</option>`).join('')}
-      </select>
-      <label class="sr-only" for="f-category">Category</label>
-      <select id="f-category">
-        <option value="">Any category</option>
-        ${cats.map(c => `<option value="${esc(c)}"${f.category === c ? ' selected' : ''}>${esc(c)} (${counts[c]})</option>`).join('')}
-      </select>
-    </div>`}
+    ${f.showRemoved ? '' : shortcutsHtml() + haveHtml()}
 
-    <p class="muted small" id="count" style="margin-top:14px"></p>
+    <div id="list-head"></div>
     <div id="list" class="squares"></div>
 
     ${!f.showRemoved && removedCount ? `<button class="link-btn" data-action="show-removed">Show removed (${removedCount})</button>` : ''}
 
   `;
   renderList();
+  showChosenDay($('.shortcuts'));
 }
 
 function renderList() {
   const el = $('#list');
   if (!el) return;
   markChips();
-  const search = runSearch();
+  markShortcuts();
+  const f = shownFilters();
+  const search = runSearch(f);
   const list = search.items;
+  const sc = !f.showRemoved && SHORTCUTS.find(s => s.key === shortcutOf(f));
+  const inShortcut = sc && sc.key !== 'all';
+
+  // Nothing searched: the dishes under quiet headings by kind of meal, newest first in each.
+  if (!f.showRemoved && !f.q.trim()) {
+    $('#list-head').innerHTML = '';
+    if (!list.length) {
+      el.innerHTML = `<p class="muted empty">${state.recipes.length ? esc(sc.empty) : (state.loading ? 'Loading your recipes…' : 'No recipes yet.')}</p>`;
+      return;
+    }
+    const groups = new Map(RECIPE_GROUPS.map(g => [g, []]));
+    for (const item of list) groups.get(groupOf(item.r)).push(item);
+    el.innerHTML = [...groups].filter(([, items]) => items.length).map(([g, items]) =>
+      `<h2 class="group-head">${esc(g.name)} <span class="count">${items.length}<span class="sr-only"> recipe${items.length === 1 ? '' : 's'}</span></span></h2>
+      ${items.map(squareHtml).join('')}`).join('');
+    return;
+  }
+
+  // A search or picked ingredients: one flat list, then the close matches as before.
   const showClose = state.closeOpenFor === state.filters.q.trim();
-  $('#count').textContent = `${list.length} recipe${list.length === 1 ? '' : 's'}` +
-    (search.mode === 'ingredients' && list.length ? ` with ${andList(search.terms)}` : '');
+  // Her words as she wrote them ("prawns", "chemmeen"), not the simple form the search compares.
+  const said = t => (searchParts(f.q).find(x => simplePhrase(x) === t) || t).toLowerCase();
+  const withWhat = search.mode === 'ingredients' && list.length ? ` with ${andList(search.terms.map(said))}` : '';
+  $('#list-head').innerHTML = `<p class="muted small" id="count">${list.length} recipe${list.length === 1 ? '' : 's'}${esc(withWhat)}${inShortcut ? ` · ${esc(sc.name)}` : ''}</p>`;
 
   let html = list.length ? list.map(squareHtml).join('') : `<p class="muted empty">${state.recipes.length
-    ? (search.mode === 'ingredients' ? `No recipes have all of ${andList(search.terms)}.` : 'No recipes match.')
-    : (state.loading ? 'Loading your recipes…' : 'No recipes yet.')}</p>`;
+    ? (search.mode === 'ingredients' ? `No recipes have all of ${esc(andList(search.terms.map(said)))}.` : 'No recipes match.')
+    : (state.loading ? 'Loading your recipes…' : 'No recipes yet.')}</p>${list.length || !inShortcut ? ''
+    : '<button type="button" class="link-btn look-all" data-shortcut="all">Look in all recipes</button>'}`;
   if (search.close.length) {
     const n = search.close.length;
+    // Only the style is missing ("prawns, roast"): say plainly they're her other prawns dishes.
+    const styleOnly = search.close.every(c => c.match.style);
+    const have = andList(search.terms.filter(t => !STYLES[t]).map(said));
+    const title = styleOnly ? `Other ${have} dishes` : 'Close matches';
     html += showClose
-      ? `<h2 class="section close-heading">Close matches <span class="muted small">missing one thing</span></h2>
+      ? `<h2 class="section close-heading">${esc(title)} <span class="muted small">${styleOnly ? 'in another style' : 'missing one thing'}</span></h2>
          ${search.close.map(squareHtml).join('')}
-         <button class="link-btn close-toggle" data-action="hide-close">Hide close matches</button>`
-      : `<button class="link-btn close-toggle" data-action="show-close">Show ${n} close match${n === 1 ? '' : 'es'} (missing 1 thing)</button>`;
+         <button class="link-btn close-toggle" data-action="hide-close">Hide ${styleOnly ? 'these' : 'close matches'}</button>`
+      : `<button class="link-btn close-toggle" data-action="show-close">${styleOnly
+          ? `Show ${n} other ${esc(have)} dish${n === 1 ? '' : 'es'}`
+          : `Show ${n} close match${n === 1 ? '' : 'es'} (missing 1 thing)`}</button>`;
   }
   el.innerHTML = html;
 }
@@ -1916,7 +2153,7 @@ function squareHtml({ r, match }, { status: showStatus = true } = {}) {
   return `<a class="square tint-${tileTint(r)}${match ? ' close-match' : ''}" href="#recipe/${r.row}">
     ${iconSvg(iconFor(r))}
     <span class="name${String(r.name).trim() ? '' : ' untitled'}">${esc(displayName(r))}</span>
-    ${match ? `<span class="status close-status">${match.have} of ${match.of} · no ${esc(match.missing)}</span>` : (status ? `<span class="status">${esc(status)}</span>` : '')}
+    ${match ? `<span class="status close-status">${match.style ? `not a ${esc(match.missing)}` : `${match.have} of ${match.of} · no ${esc(match.missing)}`}</span>` : (status ? `<span class="status">${esc(status)}</span>` : '')}
   </a>`;
 }
 
@@ -1941,6 +2178,7 @@ function renderRecipe(row) {
       <div id="r-picture">${pictureHtml(r)}</div>
       <h1 class="dish-title">${esc(displayName(r))}</h1>
       <p class="muted">${esc(category || 'No category')} · ${esc(momSays(r))}</p>
+      ${collectionsLine(r)}
 
       <a class="btn primary block" href="${esc(r.link)}" target="_blank" rel="noopener">${esc(openLabel(r))}</a>
       <div id="r-plan">${recipePlanHtml(r)}</div>
@@ -1964,6 +2202,7 @@ function renderRecipe(row) {
       <div id="r-picture">${pictureHtml(r)}</div>
       <h1 class="dish-title">${esc(displayName(r))}</h1>
       <p class="muted">${isMine(r) ? 'Yours · ' : ''}${esc(category || 'No category')} · ${esc(statusLabel(r))}</p>
+      ${collectionsLine(r)}
       <p class="muted meals-line">${meals.length ? `Shows in: ${esc(meals.join(', '))}` : 'Not in any meal yet'}</p>
       <div id="r-made">${recipeMadeHtml(r)}</div>
 
@@ -2001,6 +2240,8 @@ function renderRecipe(row) {
 
     <div id="r-meals" class="edit-meals">${mealsHtml(r)}</div>
 
+    ${collectionTogglesHtml(tagsOf(r), 'r-tags-label', 'Collections')}
+
     <label class="field" for="r-ingredients">Ingredients, one per line</label>
     <textarea id="r-ingredients" placeholder="tomato&#10;chicken&#10;cream">${esc(r.ingredients.join('\n'))}</textarea>
 
@@ -2022,6 +2263,27 @@ function renderRecipe(row) {
   `;
   view().dataset.category = category;
   loadPhotos();
+}
+
+/** "Naadan · One pot": the collections a dish is in, quietly, or '' for none. */
+function collectionsLine(r) {
+  const names = tagsOf(r).map(collectionOf).filter(Boolean).map(c => c.name);
+  return names.length ? `<p class="muted collections-line"><span class="sr-only">Collections: </span>${esc(names.join(' · '))}</p>` : '';
+}
+
+/** The two collection toggles on the Edit and Add screens; `id` names the group's label. */
+function collectionTogglesHtml(tags, id, label) {
+  return `<p class="field field-label" id="${id}">${esc(label)}</p>
+    <div class="meal-buttons tag-buttons" role="group" aria-labelledby="${id}">
+      ${COLLECTIONS.map(c => `<button type="button" data-tag-toggle="${c.key}" aria-pressed="${tags.includes(c.key)}">${esc(c.toggle)}</button>`).join('')}
+    </div>`;
+}
+
+/** Turns a toggle button on or off on screen; returns whether it's now on. */
+function flipToggle(el) {
+  const on = el.getAttribute('aria-pressed') !== 'true';
+  el.setAttribute('aria-pressed', on);
+  return on;
 }
 
 /**
@@ -2186,6 +2448,10 @@ function recipeChanges(r) {
   // Ingredients: one per line (commas work too).
   const list = $('#r-ingredients').value.split(/\n|,/).map(x => x.trim()).filter(Boolean);
   if (list.join('\n') !== r.ingredients.join('\n')) changed.ingredients = list;
+  // Collections: the toggles that are on, plus any key this version doesn't know.
+  const on = [...document.querySelectorAll('[data-tag-toggle][aria-pressed=true]')].map(b => b.dataset.tagToggle);
+  const tags = tidyTags([...on, ...tagsOf(r).filter(t => !collectionOf(t))]);
+  if (tags.join() !== tidyTags(tagsOf(r)).join()) changed.tags = tags;
   return changed;
 }
 
@@ -2602,7 +2868,7 @@ function refreshShopping() {
 // ---------- views: Add ----------
 
 function newDraft(link = '') {
-  return { link, name: '', category: '', status: STATUS.toTry, notes: '', title: '', force: false, error: '' };
+  return { link, name: '', category: '', status: STATUS.toTry, notes: '', tags: [], title: '', force: false, error: '' };
 }
 
 function renderAdd() {
@@ -2635,6 +2901,8 @@ function renderAdd() {
 
     <label class="field" for="a-status">Status</label>
     <select id="a-status">${statusOptions(d.status)}</select>
+
+    ${collectionTogglesHtml(tagsOf(d), 'a-tags-label', 'Collections (optional)')}
 
     <label class="field" for="a-notes">Notes</label>
     <textarea id="a-notes" placeholder="From the family WhatsApp group">${esc(d.notes)}</textarea>
@@ -2680,7 +2948,7 @@ async function saveNew(btn) {
   btn.textContent = 'Saving…';
   try {
     const data = await addRecipe(
-      { link: d.link, name: d.name, category: d.category, status: d.status, notes: d.notes },
+      { link: d.link, name: d.name, category: d.category, status: d.status, notes: d.notes, tags: tagsOf(d) },
       d.force,
     );
     // A repeat found in the database is put in the list so "Open it" works,
@@ -2704,23 +2972,39 @@ async function fetchTitle(link) {
   return res.json();
 }
 
-// ---------- views: sign in ----------
+// ---------- views: the welcome screen and sign-in (signed out) ----------
+// The plain address shows one calm screen: family type their name and the
+// family code and come in as guests. Nothing on it points at an email
+// sign-in. Mom and Sharon sign in at #signin (…/#signin), once per phone.
 
-function renderSignIn() {
-  // "This link has expired" and the like, with the usual form a tap away.
-  if (state.notice) {
-    view().innerHTML = `
-      <h1 class="join-title">${esc(state.notice.title)}</h1>
-      <p class="join-text">${esc(state.notice.text)}</p>
-      <div class="footer-action">
-        <button class="link-btn sign-out" data-action="show-sign-in">Sign in with email</button>
-      </div>
-    `;
-    return;
-  }
+/**
+ * The signed-out welcome. With an old family link (#join=<code>) the code
+ * comes from the link and its field is hidden. `keep` puts back what was
+ * typed and an error under the code: { name, error }.
+ */
+function renderWelcome(keep = {}) {
+  const link = joinCodeFrom(location.hash);
+  const notice = state.notice;
   view().innerHTML = `
-    <h1>Sign in</h1>
-    <p class="muted">Sign in once and this phone will remember you.</p>
+    <h1 class="join-title">${esc(notice ? notice.title : 'Welcome!')}</h1>
+    <p class="join-text">${esc(notice ? notice.text : 'Mom’s recipes, on your phone.')}</p>
+    <form id="join" class="welcome-family" data-link="${esc(link)}" data-notice="${notice ? 'yes' : ''}" novalidate>
+      <label class="field" for="j-name">Your name</label>
+      <input id="j-name" type="text" autocomplete="given-name" autocapitalize="words" maxlength="40" enterkeyhint="${link ? 'go' : 'next'}" value="${esc(keep.name || '')}" aria-describedby="j-name-error">
+      <p class="error" id="j-name-error" hidden></p>
+      ${link ? '' : `<label class="field" for="j-code">Family code</label>
+      <input id="j-code" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" enterkeyhint="go" aria-describedby="j-error">`}
+      <p class="error" id="j-error"${keep.error ? '' : ' hidden'} role="alert">${esc(keep.error || '')}</p>
+      <button class="primary block join-go" type="submit">Continue as guest</button>
+    </form>
+  `;
+}
+
+/** #signin: the email and password form for Mom and Sharon. */
+function renderSignIn() {
+  view().innerHTML = `
+    <h1 class="join-title">Sign in</h1>
+    <p class="join-text">Sign in once and this phone will remember you.</p>
     <form id="sign-in" novalidate>
       <label class="field" for="s-email">Email</label>
       <input id="s-email" type="email" inputmode="email" autocomplete="username" autocapitalize="off" spellcheck="false">
@@ -2729,26 +3013,13 @@ function renderSignIn() {
       <p class="error" id="s-error" hidden></p>
       <button class="primary block" style="margin-top:20px" type="submit">Sign in</button>
     </form>
+    <p class="member-ask">Family? <a class="inline-link" href="#today">Continue as guest</a></p>
   `;
 }
 
-/** The family link's welcome: just a name, then in. No email, no password. */
-function renderJoin() {
-  view().innerHTML = `
-    <h1 class="join-title">Welcome!</h1>
-    <p class="join-text">Mom’s recipes, on your phone.</p>
-    <form id="join" novalidate>
-      <label class="field" for="j-name">What’s your name?</label>
-      <input id="j-name" type="text" autocomplete="given-name" autocapitalize="words" maxlength="40" enterkeyhint="go">
-      <p class="error" id="j-error" hidden></p>
-      <button class="primary block" style="margin-top:20px" type="submit">Continue as guest</button>
-    </form>
-  `;
-}
-
-// ---------- views: Visitors (Mom and Sharon only) ----------
-// Who came in through the family link and when, the link to send again, and
-// a way to make a new one.
+// ---------- views: Visitors (the guest list for Sharon only, allowed_users.admin; the family code for both) ----------
+// Who came in as a guest and when, the family code to send again, a way to
+// change it to something easy to remember, and a way to make a random one.
 
 /** "just now", "5 minutes ago", "yesterday", "2 days ago", "3 weeks ago". */
 function timeAgo(iso) {
@@ -2768,7 +3039,11 @@ function timeAgo(iso) {
   return ago(Math.floor(days / 365), 'year');
 }
 
-const familyLink = code => `${location.origin}${location.pathname}#join=${code}`;
+/** The address family open, as written in the message: "https://cookery-five.vercel.app". */
+const appAddress = () => `${location.origin}${location.pathname}`.replace(/\/(index\.html)?$/, '');
+
+/** What Share and Copy send to the family. */
+const codeMessage = code => `Open ${appAddress()} and tap Continue as guest. Family code: ${code}`;
 
 let visitorsLoading = false;
 async function loadVisitors() {
@@ -2776,11 +3051,13 @@ async function loadVisitors() {
   visitorsLoading = true;
   try {
     await requireSession();
+    // Mom gets the family code only; who came in is for Sharon (admin) alone.
+    const none = Promise.resolve([]);
     const [guests, code, planned, added] = await Promise.all([
-      query(db().from('guests').select('user_id, name, first_seen, last_seen').order('last_seen', { ascending: false })),
+      state.admin ? query(db().from('guests').select('user_id, name, first_seen, last_seen').order('last_seen', { ascending: false })) : none,
       query(db().rpc('get_family_code')),
-      query(db().from('meal_plan').select('guest_id').not('guest_id', 'is', null)),
-      query(db().from('recipes').select('owner').not('owner', 'is', null)),
+      state.admin ? query(db().from('meal_plan').select('guest_id').not('guest_id', 'is', null)) : none,
+      state.admin ? query(db().from('recipes').select('owner').not('owner', 'is', null)) : none,
     ]);
     const counts = {};
     const count = (id, k) => { counts[id] = counts[id] || { planned: 0, added: 0 }; counts[id][k] += 1; };
@@ -2793,18 +3070,22 @@ async function loadVisitors() {
   } finally {
     visitorsLoading = false;
   }
-  if (location.hash === '#visitors') renderVisitors();
+  if (location.hash !== '#visitors') return;
+  if ($('#v-link')) refreshVisitors(); // already up: leave the Change code box alone
+  else renderVisitors();
 }
 
 function renderVisitors() {
   if (!state.visitors) loadVisitors();
   view().innerHTML = `
     ${backHtml()}
-    <h1>Visitors</h1>
-    <p class="muted">Family who came in with the family link. They see Mom’s recipes and plan for themselves; they can’t change hers.</p>
+    ${state.admin ? `<h1>Visitors</h1>
+    <p class="muted">Family who came in with the family code. They see Mom’s recipes and plan for themselves; they can’t change hers.</p>
     <div id="v-list">${visitorsListHtml()}</div>
-    <h2 class="section">Family link</h2>
-    <div id="v-link">${familyLinkHtml()}</div>
+    <h2 class="section">Family code</h2>` : `<h1>Family code</h1>
+    <p class="muted">Family open the app, tap Continue as guest and type this code. They see your recipes and plan for themselves; they can’t change yours.</p>`}
+    <div id="v-link">${familyCodeHtml()}</div>
+    <p class="muted small signin-note">To sign in on a new phone: ${esc(appAddress().replace(/^https?:\/\//, ''))}/#signin</p>
   `;
 }
 
@@ -2812,7 +3093,7 @@ function visitorsListHtml() {
   const v = state.visitors;
   if (!v) return '<p class="muted">Loading…</p>';
   if (v.error && !v.guests.length) return `<p class="muted">${esc(v.error)}</p>`;
-  if (!v.guests.length) return '<p class="muted empty">Nobody yet. Send the family link below.</p>';
+  if (!v.guests.length) return '<p class="muted empty">Nobody yet. Send them the family code below.</p>';
   return `<ul class="visitors">${v.guests.map(g => {
     const c = v.counts[g.user_id] || { planned: 0, added: 0 };
     const did = [
@@ -2830,59 +3111,116 @@ function visitorsListHtml() {
   }).join('')}</ul>`;
 }
 
-function familyLinkHtml() {
+function familyCodeHtml() {
   const v = state.visitors;
   if (!v) return '';
-  if (!v.code) return `<p class="muted">${v.error ? esc(v.error) : 'No family link yet.'}</p>
-    <button type="button" class="btn block" data-action="new-link">Make a link</button>`;
-  return `<label class="sr-only" for="v-link-text">Family link</label>
-    <input id="v-link-text" class="family-link" type="text" readonly value="${esc(familyLink(v.code))}">
+  if (!v.code && !v.changing) return `<p class="muted">${v.error ? esc(v.error) : 'No family code yet.'}</p>
+    <button type="button" class="btn block" data-action="change-code">Choose a code</button>
+    <button type="button" class="link-btn new-link" data-action="new-link">Make a random one</button>`;
+  const change = v.changing
+    ? `<form id="code-form" class="code-form" novalidate>
+        <label class="field" for="v-new-code">New family code</label>
+        <input id="v-new-code" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="${CODE_MAX + 20}" enterkeyhint="done" aria-describedby="v-code-hint v-code-error">
+        <p class="muted small hint" id="v-code-hint">Use 6 or more letters or numbers that family will remember but strangers won’t guess.</p>
+        <p class="error" id="v-code-error" role="alert"${v.codeError ? '' : ' hidden'}>${esc(v.codeError || '')}</p>
+        <div class="row link-actions">
+          <button type="button" data-action="cancel-code">Cancel</button>
+          <button type="submit" class="primary">Save</button>
+        </div>
+      </form>`
+    : '<button type="button" class="btn block change-code" data-action="change-code">Change code</button>';
+  return `${v.code ? `<p class="family-code" id="v-code" aria-label="The family code">${esc(v.code)}</p>
     <div class="row link-actions">
       <button type="button" data-action="copy-link">Copy</button>
       ${navigator.share ? '<button type="button" class="primary" data-action="share-link">Share</button>' : ''}
-    </div>
-    ${v.fresh ? '<p class="muted small link-note">This is a new link. The old one won’t let anyone new in; people already in stay in.</p>' : ''}
-    <button type="button" class="link-btn new-link" data-action="new-link">Make a new link</button>`;
+    </div>` : ''}
+    ${change}
+    <p class="muted small link-note">Changing the code stops new people joining with the old one. People already in stay in.</p>
+    <button type="button" class="link-btn new-link" data-action="new-link">Make a new code</button>`;
 }
 
 function refreshVisitors() {
   if (location.hash !== '#visitors') return;
   const list = $('#v-list'), link = $('#v-link');
   if (list) list.innerHTML = visitorsListHtml();
-  if (link) link.innerHTML = familyLinkHtml();
+  // Leave the Change code box alone while she's typing in it.
+  if (link && !(link.contains(document.activeElement) && document.activeElement.id === 'v-new-code')) link.innerHTML = familyCodeHtml();
 }
 
 async function copyLink() {
-  const url = familyLink(state.visitors.code);
+  const text = codeMessage(state.visitors.code);
   try {
-    await navigator.clipboard.writeText(url);
+    await navigator.clipboard.writeText(text);
   } catch (e) {
-    // Older phones: select it and copy the old way.
-    const input = $('#v-link-text');
-    input.focus();
-    input.select();
-    if (!document.execCommand('copy')) return toast('Couldn’t copy. Press on the link to copy it.');
+    // Older phones: copy the old way, from a box that's never seen.
+    const box = document.createElement('textarea');
+    box.value = text;
+    box.setAttribute('readonly', '');
+    box.className = 'sr-only';
+    document.body.appendChild(box);
+    box.select();
+    const ok = document.execCommand('copy');
+    box.remove();
+    if (!ok) return toast('Couldn’t copy. The code is ' + state.visitors.code);
   }
-  toast('Link copied');
+  toast('Copied');
 }
 
 async function shareLink() {
-  const url = familyLink(state.visitors.code);
   try {
-    await navigator.share({ title: 'Mom’s recipes', text: 'Mom’s recipes. Tap to come in:', url });
+    await navigator.share({ title: 'Mom’s recipes', text: codeMessage(state.visitors.code) });
   } catch (e) {
     if (e && e.name !== 'AbortError') copyLink();
   }
 }
 
+/** "Change code" opens the box; Cancel closes it. */
+function openCodeForm(open) {
+  state.visitors = { ...state.visitors, changing: open, codeError: '' };
+  refreshVisitors();
+  if (open) $('#v-new-code').focus();
+}
+
+/** Save: Sharon's own code, 6 to 40 characters once tidied (set_family_code). */
+async function saveCode(form) {
+  const input = $('#v-new-code'), err = $('#v-code-error');
+  const btn = form.querySelector('button[type=submit]');
+  const code = cleanCode(input.value);
+  const fail = message => {
+    state.visitors = { ...state.visitors, codeError: message };
+    err.textContent = message;
+    err.hidden = false;
+    btn.disabled = false;
+    btn.textContent = 'Save';
+    input.focus();
+  };
+  if (!code) return fail('Type the new code first.');
+  if (code.length < CODE_MIN) return fail(`That’s too short. Use at least ${CODE_MIN} letters or numbers.`);
+  if (code.length > CODE_MAX) return fail(`That’s too long. Use at most ${CODE_MAX} letters or numbers.`);
+  if (code === state.visitors.code) return fail('That’s already the family code.');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    await requireSession();
+    const saved = await query(db().rpc('set_family_code', { code }));
+    input.blur();
+    state.visitors = { ...state.visitors, code: saved || code, changing: false, codeError: '' };
+    refreshVisitors();
+    toast('New family code saved');
+  } catch (e) {
+    fail(e && e.code === '22023' ? e.message : offlineMessage(e));
+  }
+}
+
 async function newLink(btn) {
+  if (state.visitors.code && !confirm('Make a new random code? The old one will stop letting new people in.')) return;
   btn.disabled = true;
   try {
     await requireSession();
     const code = await query(db().rpc('new_family_code'));
-    state.visitors = { ...state.visitors, code, fresh: true };
+    state.visitors = { ...state.visitors, code, changing: false, codeError: '' };
     refreshVisitors();
-    toast('New link made');
+    toast('New family code made');
   } catch (e) {
     btn.disabled = false;
     toast(offlineMessage(e));
@@ -2948,8 +3286,10 @@ function renderNotConfigured() {
 
 function render() {
   let hash = location.hash || '#today';
-  if (state.user && joinCodeFrom(hash)) {
-    // Already signed in (Mom, Sharon, or a guest): the family link isn't needed.
+  if (state.user && (joinCodeFrom(hash) || (hash === '#signin' && !isGuest()))) {
+    // Already signed in (Mom, Sharon, or a guest): the old family link or the sign-in isn't needed.
+    // A guest who opens #signin is Mom or Sharon on a phone that joined as a
+    // guest by mistake: they get the sign-in form, and signing in replaces the guest.
     history.replaceState({ idx: nav.idx }, '', location.pathname + '#today');
     nav.hashes[nav.idx] = hash = '#today';
   }
@@ -2964,13 +3304,15 @@ function render() {
   view().dataset.screen = state.user ? hash.slice(1).split('/')[0] : 'signed-out';
   revealIfNew(state.user ? hash : `signed-out ${hash}`);
 
-  if (!configured() || !state.user) {
+  if (!configured() || !state.user || (hash === '#signin' && isGuest())) {
     document.body.classList.add('no-tabs');
     if (!configured()) return renderNotConfigured();
-    // Leave a form alone if it's already up, so nothing she's typed is lost.
-    if (joinCodeFrom(hash)) return $('#join') ? undefined : renderJoin();
-    if (state.notice) return renderSignIn();
-    return $('#sign-in') ? undefined : renderSignIn();
+    // Leave a form alone if it's already up (the welcome for the same link,
+    // or none, and the same notice), so nothing typed is lost.
+    if (hash === '#signin') return $('#sign-in') ? undefined : renderSignIn();
+    const up = $('#join');
+    if (up && up.dataset.link === joinCodeFrom(hash) && up.dataset.notice === (state.notice ? 'yes' : '')) return;
+    return renderWelcome();
   }
   document.body.classList.remove('no-tabs');
 
@@ -3126,6 +3468,7 @@ window.addEventListener('hashchange', () => {
   const hash = location.hash || '#today';
   nav.hashes[nav.idx] = hash;
   entered(hash, from, fresh);
+  if (hash === '#visitors' && fresh && state.visitors) state.visitors = { ...state.visitors, changing: false, codeError: '' };
   render();
   window.scrollTo(0, nav.scrolls[nav.idx] || 0);
   // Someone else may have changed the list or the plan on their phone.
@@ -3178,12 +3521,10 @@ document.addEventListener('change', e => {
       state.meal = el.value;
       state.mealSlot = mealAt();
       return renderToday();
-    case 'f-status':
-      state.filters.status = el.value;
-      return renderList();
-    case 'f-category':
-      state.filters.category = el.value;
-      return renderList();
+    case 'search':
+      // Done typing (Enter, or she tapped away): a shortcut word moves to the row.
+      takeTypedShortcut();
+      return;
     case 'a-category':
       state.draft.category = pickCategory(el, state.draft.category);
       return;
@@ -3227,7 +3568,9 @@ document.addEventListener('click', async e => {
   }
 
   // Recipes list
-  if (ds.chip) return toggleChip(ds.chip);
+  if (ds.shortcut && hash === '#recipes') return pickShortcut(ds.shortcut);
+  if (ds.action === 'have-toggle') return toggleHave();
+  if (ds.chip) { takeTypedShortcut(); return toggleChip(ds.chip); }
   if (ds.action === 'chip-clear') { state.filters.q = ''; $('#search').value = ''; return renderList(); }
   if (ds.action === 'show-close') { state.closeOpenFor = state.filters.q.trim(); return renderList(); }
   if (ds.action === 'hide-close') { state.closeOpenFor = null; return renderList(); }
@@ -3245,6 +3588,8 @@ document.addEventListener('click', async e => {
     if (ds.action === 'choose-close') { state.choose = null; return refreshRecipePlan(r); }
     if (ds.ing) return toggleIngredient(r, Number(ds.ing));
     if (!canEdit(r)) return; // a guest on one of Mom's recipes: nothing below is for them
+    // Edit form: the collection toggles only change on screen until Save.
+    if (ds.tagToggle && String(state.editing) === String(r.row)) { flipToggle(el); return showRecipeSave(); }
     if (ds.action === 'meals-open') { state.mealsOpen = String(r.row); return refreshMeals(r); }
     if (ds.action === 'meals-close') { state.mealsOpen = null; return refreshMeals(r); }
     if (ds.mealToggle) return toggleMeal(r, ds.mealToggle);
@@ -3318,6 +3663,12 @@ document.addEventListener('click', async e => {
   // Add
   if (hash === '#add') {
     if (ds.action === 'save-anyway') { state.draft.force = true; return renderAdd(); }
+    if (ds.tagToggle) {
+      const on = flipToggle(el);
+      const tags = tagsOf(state.draft).filter(t => t !== ds.tagToggle);
+      state.draft.tags = tidyTags(on ? [...tags, ds.tagToggle] : tags);
+      return;
+    }
     if (ds.action === 'save-new') return saveNew(el);
   }
 
@@ -3327,14 +3678,25 @@ document.addEventListener('click', async e => {
     if (ds.action === 'copy-link') return copyLink();
     if (ds.action === 'share-link') return shareLink();
     if (ds.action === 'new-link') return newLink(el);
+    if (ds.action === 'change-code') return openCodeForm(true);
+    if (ds.action === 'cancel-code') return openCodeForm(false);
   }
 
   if (ds.action === 'visitors') { location.hash = '#visitors'; return; }
   if (ds.action === 'leave-guest') return leaveGuest();
-  if (ds.action === 'show-sign-in') { state.notice = null; return render(); }
   if (ds.action === 'sign-out') {
     if (!confirm('Sign out of the recipe app on this phone?')) return;
     return signOut();
+  }
+});
+
+// The welcome: Enter in "Your name" goes on to "Family code" rather than sending a half-filled form.
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter' || e.target.id !== 'j-name') return;
+  const code = $('#j-code');
+  if (code && !code.value.trim() && e.target.value.trim()) {
+    e.preventDefault();
+    code.focus();
   }
 });
 
@@ -3343,6 +3705,7 @@ document.addEventListener('submit', async e => {
     // The list already updates as she types; Search just closes the keyboard.
     e.preventDefault();
     state.filters.q = $('#search').value;
+    takeTypedShortcut();
     $('#search').blur();
     renderList();
     return;
@@ -3367,6 +3730,10 @@ document.addEventListener('submit', async e => {
   if (e.target.id === 'join') {
     e.preventDefault();
     return submitJoin(e.target);
+  }
+  if (e.target.id === 'code-form') {
+    e.preventDefault();
+    return saveCode(e.target);
   }
   if (e.target.id !== 'sign-in') return;
   e.preventDefault();
@@ -3403,30 +3770,42 @@ document.addEventListener('submit', async e => {
   if (!sharing) showWelcome();
 });
 
-/** "Continue as guest": in with the code from the link, then the first page says hello. */
+/** "Continue as guest": in with the typed code (or the old link's), then the first page says hello. */
 async function submitJoin(form) {
-  const code = joinCodeFrom(location.hash);
-  const name = $('#j-name').value.trim().replace(/\s+/g, ' ').slice(0, 40);
-  const err = $('#j-error');
-  const btn = form.querySelector('button');
+  const link = form.dataset.link || '';
+  const codeInput = $('#j-code');
+  const code = link || cleanCode(codeInput && codeInput.value);
+  const nameInput = $('#j-name');
+  const name = nameInput.value.trim().replace(/\s+/g, ' ').slice(0, 40);
+  const nameErr = $('#j-name-error'), err = $('#j-error');
+  const btn = form.querySelector('button[type=submit]');
+  const say = (el, message) => { el.textContent = message; el.hidden = !message; };
   const fail = message => {
-    err.textContent = message;
-    err.hidden = false;
+    say(err, message);
     btn.disabled = false;
     btn.textContent = 'Continue as guest';
   };
-  if (!name) return fail('Type your name first.');
+  say(nameErr, name ? '' : 'Type your name first.');
+  say(err, code ? '' : 'Type the family code. Ask Sharon if you don’t have it.');
+  if (!name) return nameInput.focus();
+  if (!code) return codeInput.focus();
   btn.disabled = true;
   btn.textContent = 'Coming in…';
   try {
     await joinFamily(code, name);
   } catch (ex) {
-    if (ex.message !== 'expired') return fail(joinMessage(ex));
-    // The code is no good: take it out of the address and say so.
-    state.notice = EXPIRED;
-    history.replaceState({ idx: nav.idx }, '', location.pathname + '#today');
-    nav.hashes[nav.idx] = '#today';
-    return render();
+    if (ex.message !== 'wrong-code') return fail(joinMessage(ex));
+    if (link) {
+      // An old link: take its code out of the address and ask for the code
+      // itself, keeping the name they typed.
+      history.replaceState({ idx: nav.idx }, '', location.pathname + '#today');
+      nav.hashes[nav.idx] = '#today';
+      renderWelcome({ name, error: OLD_LINK });
+      return $('#j-code').focus();
+    }
+    fail(WRONG_CODE);
+    codeInput.focus();
+    return codeInput.select();
   }
   if (document.activeElement) document.activeElement.blur();
   // The code has done its job: out of the address, so it isn't kept or shared on.
@@ -3558,6 +3937,8 @@ async function checkSession() {
       } else if (state.user !== u.email || isGuest()) {
         setMember(u.email);
         render();
+      } else {
+        refreshAdmin();
       }
       loadRecipes({ quiet: state.recipes.length > 0 });
       loadShopping();
@@ -3574,7 +3955,22 @@ async function checkSession() {
  * Gourmet as she tapped. showWelcome(new Date(2026, 0, 1, 19)) in the
  * console plays it as if it were 7pm.
  */
+/**
+ * True when the app has just been opened, rather than refreshed or brought
+ * back with the browser's Back/Forward, and it's opening at the start (not a
+ * link to a particular screen). Yo Mom plays once per open, not per reload.
+ */
+function freshOpen() {
+  let how = 'navigate';
+  try { how = (performance.getEntriesByType('navigation')[0] || {}).type || 'navigate'; } catch (e) { /* old browser: treat as an open */ }
+  let seen = false;
+  try { seen = sessionStorage.getItem('welcomed') === '1'; } catch (e) { /* private mode: no memory */ }
+  const atStart = !location.hash || location.hash === '#today';
+  return how !== 'reload' && how !== 'back_forward' && !seen && atStart;
+}
+
 function showWelcome(when = new Date()) {
+  try { sessionStorage.setItem('welcomed', '1'); } catch (e) { /* fine without */ }
   const meals = welcomeMeals(when);
   const landed = meals[meals.length - 1].meal;
   // "Yo Mom" for Mom (and Sharon); a guest by their first name, "Yo Anu".
@@ -3620,8 +4016,9 @@ function start() {
     setDraftLink(shared);
   } else {
     render();
-    // "Yo Mom" each time she opens the app, but not when she's sharing a link in.
-    if (configured() && state.user) showWelcome();
+    // "Yo Mom" each time she opens the app, but not when she's sharing a link
+    // in, and not on a refresh: then she stays on the screen she was on.
+    if (configured() && state.user && freshOpen()) showWelcome();
   }
 
   if (configured()) checkSession();

@@ -16,6 +16,8 @@ dev/test-sheet.json
 
 # Ingredient lists for her recipes (her data): reviewed locally, never committed.
 dev/ingredients*
+# Which of her recipes are Naadan / One pot (dev/server.js --mine reads it): her data too.
+dev/tags.txt
 
 # Temporary files from the Supabase command-line tool.
 supabase/.temp/
@@ -29,3 +31,7 @@ dev/backup/
 dev/concepts/
 dev/redesign-wip/
 dev/live/
+
+# New recipe ideas picked for her, checked against her list (her data).
+dev/new-recipes.json
+dev/new-recipes.md

@@ -4,7 +4,7 @@
 // shopping list, meal plan and photos): those must always be fresh, the app
 // keeps its own copy of the list and plan, and photo links are private and run out.
 
-const CACHE = 'recipes-v24';
+const CACHE = 'recipes-v33';
 // The database library, pinned to the same version as in index.html. A pinned
 // version never changes, so it's served from the cache first.
 const LIBRARY = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js';

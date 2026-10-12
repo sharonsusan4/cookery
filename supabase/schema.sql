@@ -6,8 +6,9 @@
 -- supabase/migrations/002_last_made_shopping_photos.sql, one set up before
 -- "Quick & easy" / "Gourmet" needs 003_effort.sql, one set up before the meal
 -- plan needs 004_meal_plan.sql, one set up before guest mode needs
--- 005_guests.sql, one set up before "Shows in" needs 006_meals.sql, and one
--- set up before a dish could be planned twice needs 007_plan_repeats.sql; this
+-- 005_guests.sql, one set up before "Shows in" needs 006_meals.sql, one set
+-- up before a dish could be planned twice needs 007_plan_repeats.sql, and one
+-- set up before the Naadan and One pot collections needs 008_tags.sql; this
 -- file already includes everything in all of them. Needs Postgres 15 or newer.
 
 -- ---------- recipes ----------
@@ -52,6 +53,10 @@ create table public.recipes (
   -- Snacks, Dinner, Desserts, Drinks), or null for "the meals its category
   -- belongs to". Main dish or "On the side" still follows the category.
   meals text[],
+  -- The collections it's in, as lowercase keys from COLLECTIONS in
+  -- app/app.js ('naadan', 'onepot'). Null or empty: none. No CHECK, so a
+  -- collection can be added later without a migration.
+  tags text[],
 
   -- Null: Mom's (the family's) recipe. Otherwise the guest who added it (see
   -- "guests" below). The app shows allowed users only owner is null.
@@ -127,9 +132,10 @@ $$;
 revoke execute on function public.is_allowed() from public, anon;
 grant execute on function public.is_allowed() to authenticated;
 
--- ---------- guests (family members who came in through the family link) ----------
--- They are Supabase anonymous users: no email, no password. Opening
--- …/#join=<code> and typing a name calls join_family(); with the right code
+-- ---------- guests (family members who came in with the family code) ----------
+-- They are Supabase anonymous users: no email, no password. Typing their name
+-- and the family code on the welcome screen (or opening an old family link,
+-- …/#join=<code>, and typing a name) calls join_family(); with the right code
 -- they get a row in public.guests. Guests read Mom's recipes and keep their
 -- own recipes, plan and list; they never change hers. An anonymous user
 -- without a row in guests sees nothing.
@@ -139,7 +145,7 @@ create schema private;
 revoke all on schema private from public;
 revoke all on schema private from anon, authenticated;
 
--- The one current code. "Make a new link" replaces it.
+-- The one current code. "Change code" and "Make a new code" replace it.
 create table private.family_code (
   id boolean primary key default true check (id),
   code text not null,
@@ -188,6 +194,18 @@ $$;
 revoke execute on function private.make_family_code() from public, anon, authenticated;
 
 insert into private.family_code (id, code) values (true, private.make_family_code());
+
+-- How codes are compared everywhere: lowercase, no spaces at the ends, and
+-- any run of spaces inside made a single space (migration 009).
+create function private.clean_family_code(code text) returns text
+language sql
+immutable
+set search_path = ''
+as $$
+  select btrim(regexp_replace(lower(coalesce(code, '')), '[[:space:]]+', ' ', 'g'));
+$$;
+
+revoke execute on function private.clean_family_code(text) from public, anon, authenticated;
 
 -- One row per guest. Deleting their anonymous user (Authentication > Users)
 -- removes the row and everything they added.
@@ -248,12 +266,19 @@ begin
     return false;
   end if;
 
+  -- Across everyone: the app starts a fresh anonymous session for each try, so
+  -- the limit above rarely bites. 30 wrong codes in an hour from anyone (someone
+  -- guessing) pauses joining until the hour has passed; family can try later.
+  if (select count(*) from private.join_failures f where f.at > now() - interval '1 hour') >= 30 then
+    raise exception 'Too many wrong family codes just now. Try again later.' using errcode = 'P0001';
+  end if;
+
   select fc.code into current_code from private.family_code fc where fc.id;
 
   -- Compared as hashes, so how long the comparison takes says nothing about the code.
   if current_code is null or
-     sha256(convert_to(lower(trim(coalesce(join_family.code, ''))), 'UTF8')) <>
-     sha256(convert_to(current_code, 'UTF8')) then
+     sha256(convert_to(private.clean_family_code(join_family.code), 'UTF8')) <>
+     sha256(convert_to(private.clean_family_code(current_code), 'UTF8')) then
     insert into private.join_failures (user_id) values (uid);
     delete from private.join_failures f where f.at < now() - interval '1 day';
     return false;
@@ -314,6 +339,38 @@ $$;
 
 revoke execute on function public.new_family_code() from public, anon;
 grant execute on function public.new_family_code() to authenticated;
+
+-- Allowed users only: set the family code to one they choose, so it can be
+-- short and easy to remember. 6 to 40 characters once cleaned; returns the
+-- code as it will be compared. People already in stay in.
+create function public.set_family_code(code text) returns text
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+#variable_conflict use_column
+declare
+  clean text := private.clean_family_code(set_family_code.code);
+begin
+  if not public.is_allowed() then
+    raise exception 'Only allowed users can change the family code' using errcode = '42501';
+  end if;
+  if char_length(clean) < 6 then
+    raise exception 'The family code needs at least 6 letters or numbers.' using errcode = '22023';
+  end if;
+  if char_length(clean) > 40 then
+    raise exception 'The family code can have at most 40 letters or numbers.' using errcode = '22023';
+  end if;
+  insert into private.family_code (id, code, created_at)
+  values (true, clean, now())
+  on conflict (id) do update set code = excluded.code, created_at = excluded.created_at;
+  return clean;
+end;
+$$;
+
+revoke execute on function public.set_family_code(text) from public, anon;
+grant execute on function public.set_family_code(text) to authenticated;
 
 -- Allowed users only: the current code, for the Visitors page.
 create function public.get_family_code() returns text

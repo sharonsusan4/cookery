@@ -1,4 +1,22 @@
-# Design: "Banana leaf"
+# Design: "Sorbet" (colours) on the "Banana leaf" layout
+
+**Colours changed in October 2026.** Mom didn't like the green and yellow, and
+chose **Sorbet** from a side-by-side board: a light warm page (`#fdf8f4`),
+dark text (`#2e2622`), white raised cards, coral for the accent and primary
+buttons (`#b4462f`, white text on it), and each dish card on its own soft
+pastel by dish type (`--orange-bg` … `--gray-bg` in `app/styles.css`: peach,
+rose, mint, butter, lilac, sky…). First page XO squares: peach `#fce3d6` and
+lilac `#e3e0f4`. `theme-color` and the manifest colours are `#fdf8f4`, and
+`color-scheme` is light. All text pairs pass WCAG AA (coral ≥4.7:1 on every
+surface, outlines ≥3:1). The variable *names* below (`--leaf`, `--cream`,
+`--brass`) are kept from the green theme; read them as page, page text and
+accent. Everything else in this file (layout, type, spacing, motion, do's and
+don'ts) still applies; the hex values in the palette section below are the
+old green theme's.
+
+---
+
+## Original notes ("Banana leaf")
 
 The look of Mom's recipe app. A deep banana-leaf green page, cream text, and
 brass for the few small things that matter. The dishes sit on the leaf as
@@ -141,6 +159,24 @@ squares with deep green icons and names.
   in its tint colour, the name in deep green 14.5px/600, two lines kept.
   Status ("Loved") in `--ink-2` along the bottom. A close match gets a fine
   dashed inner edge, never fading.
+- **Recipes tab** (simplified Oct 2026; Mom found it too busy): the title,
+  then one search box (a quiet magnifier inside, "Search a dish, or type what
+  you have"; no Search button, the keyboard's search key and live results are
+  enough). Typing a shortcut word on its own ("naadan", "one pot", "onepot",
+  "bachelor", "loved", "to try") shows that shortcut at once and moves it to
+  the row when she's done typing. Then one **shortcut row**, All · Naadan ·
+  One pot · Loved · To try, plain words sharing the day strip's rules (chosen
+  word in ink with a coral underline, one at a time, no counts so all five fit
+  at 360px). Then one **"What do you have?"** button (coral outline and words,
+  a chevron that turns) opening the "I have" chips and "Make it" bar inline on
+  a white card; what she's picked shows under it, open or shut ("With prawns
+  · roast", Clear). With nothing searched the dishes sit under quiet Gloock
+  headings by kind of meal (Breakfast, Curries and mains, Sides and chutneys,
+  Snacks, Sweets and desserts, Breads and baking, Drinks, Other) with a quiet
+  count; a search gives one flat list with a one-line heading and the close
+  matches as before. No category or status dropdowns, no collection cards.
+  On a recipe the collections show as a quiet "Naadan · One pot" line; Edit
+  and Add have two toggles in the meal-toggle style.
 - **Buttons**: primary is brass with deep green text; secondary is a 1.5px
   `--line-strong` outline with cream text (cream outline on the first page);
   quiet text buttons are brass (or `--cream-2`/`--cream-3` for the quietest).
@@ -169,8 +205,11 @@ squares with deep green icons and names.
   ingredients as a raised card with hairlines and brass dots.
 - **Messages** (`.toast`): a cream card with deep green text above the bar,
   the action ("Undo", "Change") underlined in `--ink-link`.
-- **Sign-in, join ("Welcome!")**, notices: no bar, the title in Gloock (56px
-  for "Welcome!"), text in `--cream-2`, a brass primary.
+- **Welcome ("Welcome!", name + family code) and `#signin`**, notices: no
+  bar, the title in Gloock (56px), text in `--cream-2`, a brass primary. The
+  plain address shows only the family form; nothing on it points to sign-in.
+- **Family code** on Visitors: the code large (30px, bold, spaced) on a raised
+  white card, Copy / Share under it, then Change code.
 - **Footer links** (Visitors, Sign out, Leave guest mode): `--cream-3`, over a
   hairline.
 - **First page (XO)**: same leaf, glow and veins; cream X and sand O squares
