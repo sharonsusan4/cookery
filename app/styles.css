@@ -973,15 +973,54 @@ button.square .name { font-size: 14.5px; font-weight: 600; }
 .member-ask { margin: var(--s6) 0 0; padding-top: var(--s4); border-top: 1px solid var(--hairline); text-align: center; color: var(--cream-2); font-size: 17px; }
 .member-ask .inline-link { display: inline-block; min-height: 48px; line-height: 48px; padding: 0 4px; margin: -8px 0; }
 
-/* Visitors · Sign out at the bottom of Today */
-.footer-links { display: flex; flex-wrap: wrap; justify-content: center; column-gap: 28px; padding-top: var(--s3); border-top: 1px solid var(--hairline); }
+/* ---- the You page (#me): who's signed in, People (Sharon), Family code, Sign out ---- */
+/* The round initial at the top right of Today and Cooked that opens it. */
+.meal-head { position: relative; }
+.me-btn {
+  position: absolute; top: -6px; right: 0; z-index: 1;
+  display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%;
+  background: var(--plate-ring); color: var(--brass); text-decoration: none;
+  font-family: var(--display); font-size: 21px; line-height: 1;
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--brass) 35%, transparent);
+}
+.me-btn .icon { width: 22px; height: 22px; }
+.me-btn:active { transform: scale(0.95); }
+.tab-head { position: relative; }
+.tab-head .me-btn { top: 4px; }
+.me-head { display: flex; align-items: center; gap: var(--s4); margin: var(--s2) 0 var(--s4); }
+.me-avatar {
+  flex: none; display: grid; place-items: center; width: 72px; height: 72px; border-radius: 50%;
+  background: var(--plate-ring); color: var(--brass); font-family: var(--display); font-size: 36px; line-height: 1;
+}
+.me-who { min-width: 0; }
+.me-name { margin: 0; font-size: var(--fs-xl); line-height: 1.1; overflow-wrap: anywhere; }
+.me-sub { margin: 4px 0 0; overflow-wrap: anywhere; }
+.me-rename { margin: -6px 0 var(--s2); }
+.me-cooked { margin-top: var(--s2); }
+.me-cooked .icon { width: 24px; height: 24px; stroke-width: 1.5; }
+.me-cooked .count, .me-section h2 .count { color: var(--brass); font-family: var(--sans); font-size: var(--fs-sm); font-weight: 700; margin-left: 4px; }
+.me-section { margin-top: var(--s6); padding-top: var(--s2); border-top: 1px solid var(--hairline); }
+.me-section h2.section { margin-top: var(--s4); margin-bottom: 4px; }
+.me-section > .muted.small { margin-bottom: var(--s3); }
+.me-out { margin-top: var(--s7); padding-top: var(--s5); border-top: 1px solid var(--hairline); }
+.me-out .signin-note { border-top: none; margin-top: var(--s4); padding-top: 0; text-align: center; }
+.change-link { display: block; margin: 6px auto 0; }
 
-/* ---- Visitors page ---- */
+/* ---- People (Sharon) ---- */
 .visitors {
   list-style: none; margin: var(--s3) 0 0; padding: 2px 18px;
   background: var(--leaf-raised); border-radius: var(--r-xl); box-shadow: var(--shadow-raised);
 }
-.visitor { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--hairline); }
+.visitor { padding: 12px 0; border-bottom: 1px solid var(--hairline); }
+.visitor-row { display: flex; align-items: center; gap: 12px; }
+/* Remove asks in the person's own row. */
+.remove-ask { margin: 12px 0 2px; display: grid; gap: 8px; }
+.remove-ask p { margin: 0 0 4px; font-size: 16px; }
+.danger-btn { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, transparent); font-weight: 700; }
+.visitor-initial {
+  flex: none; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%;
+  background: var(--leaf-deep); color: var(--cream-2); font-weight: 700; font-size: 16px;
+}
 .visitor:last-child { border-bottom: none; }
 .visitor-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .visitor-name { font-weight: 700; overflow-wrap: anywhere; }
@@ -1030,3 +1069,86 @@ button.square .name { font-size: 14.5px; font-weight: 600; }
 .edit-meals { margin-top: var(--s5); }
 .edit-actions { display: flex; gap: 10px; margin-top: 24px; }
 .edit-actions button { flex: 1; min-height: 52px; }
+
+/* ---- "I cooked this": posts on a recipe, the Cooked tab, a photo opened large ---- */
+/* A recipe's "Cooked it": the button, then each post as a quiet white card. */
+.cooked-head { display: flex; align-items: baseline; gap: 10px; }
+.cooked-head .muted { font-size: var(--fs-sm); }
+.cook-btn .icon, .add-photo-btn .icon { width: 24px; height: 24px; stroke-width: 1.5; }
+.cooked-empty { margin-top: var(--s3); }
+.posts { list-style: none; margin: var(--s4) 0 0; padding: 0; display: grid; gap: var(--s4); }
+.post {
+  background: var(--leaf-raised); border-radius: var(--r-lg); padding: var(--s4);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 8px 20px -16px rgba(0, 0, 0, 0.35);
+}
+.post-by { margin: 0 0 6px; font-size: var(--fs-sm); color: var(--cream-2); }
+.post-by b { color: var(--text); font-size: 17px; margin-right: 4px; }
+.post-by b.member { color: var(--brass); } /* Mom (or Sharon) */
+.post .say { margin: 0; font-size: 17px; line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere; }
+.post-photo { display: block; margin-top: var(--s3); border-radius: var(--r-md); overflow: hidden; aspect-ratio: 4 / 3; background: var(--leaf-deep); }
+.post-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.post-foot { display: flex; align-items: center; gap: var(--s3); margin-top: var(--s2); }
+.post-foot .like-row { flex: 1; min-width: 0; }
+.post-delete { flex: none; min-height: 44px; padding: 4px 0; font-size: 15.5px; color: var(--cream-2); }
+
+/* Likes: a heart (filled coral once you've liked it), how many, and who. */
+.like-row { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+.like-btn {
+  flex: none; min-height: 44px; min-width: 44px; padding: 6px 10px 6px 4px; margin-left: -4px;
+  border: none; background: none; box-shadow: none; border-radius: var(--r-md);
+  display: inline-flex; align-items: center; gap: 6px; color: var(--cream-2); font-size: 16px; font-weight: 700;
+}
+.like-btn .icon { width: 26px; height: 26px; stroke-width: 1.6; }
+.like-btn[aria-pressed=true] { color: var(--brass); }
+.like-btn[aria-pressed=true] .icon { fill: currentColor; }
+.like-btn:active { transform: scale(0.94); background: none; }
+.liked-by { font-size: 14.5px; color: var(--cream-2); line-height: 1.3; min-width: 0; overflow-wrap: anywhere; }
+.viewer .like-row { margin: 0 0 var(--s3); }
+.viewer .like-btn, .viewer .liked-by { color: #cfc2b8; }
+.viewer .like-btn[aria-pressed=true] { color: #ff8a70; }
+
+/* "I cooked this": a photo (optional), a few words (optional), Post. */
+h1.cook-title { margin-bottom: var(--s4); }
+.add-photo-btn { min-height: 64px; border-style: dashed; }
+.cook-preview { display: block; width: 100%; max-height: 40vh; object-fit: cover; border-radius: var(--r-lg); background: var(--leaf-deep); }
+.cook-photo-links { display: flex; gap: 22px; }
+.link-btn.quiet-link { color: var(--cream-2); }
+textarea.say { min-height: 96px; line-height: 1.45; resize: vertical; }
+.cook-post { margin-top: var(--s5); }
+.who-sees { margin-top: var(--s3); font-size: var(--fs-sm); }
+
+/* The Cooked tab: two photos a row, the dish and who under each. */
+.cooked-who { margin-top: var(--s4); }
+.cooked-none { margin-top: var(--s5); }
+.wall { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s5) var(--s3); margin-top: var(--s5); }
+.wall-item { display: block; color: inherit; text-decoration: none; min-width: 0; }
+.wall-pic { display: block; aspect-ratio: 1; border-radius: var(--r-md); overflow: hidden; background: var(--leaf-deep); }
+.wall-pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.wall-tile { display: grid; place-items: center; background: var(--tile-bg, var(--card)); color: var(--tile-fg, var(--ink)); }
+.wall-tile .icon { width: 44px; height: 44px; stroke-width: 1.25; }
+.wall-item .dish { display: block; margin-top: 8px; font-size: 15.5px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+.wall-item .by { display: block; margin-top: 2px; font-size: 14px; color: var(--cream-2); }
+.wall-item:active .wall-pic { transform: scale(0.98); }
+
+/* One photo, large: dark around it so the food shows, like a phone's own gallery. */
+.viewer {
+  position: fixed; inset: 0; z-index: 40; overflow-y: auto;
+  display: flex; flex-direction: column;
+  max-width: 560px; margin: 0 auto;
+  padding: calc(8px + env(safe-area-inset-top)) var(--gutter) calc(24px + env(safe-area-inset-bottom));
+  background: #17110e; color: #f6eee8;
+}
+body:has(.viewer) { background: #17110e; }
+.viewer-top { display: flex; justify-content: flex-end; }
+.viewer-close { width: 48px; height: 48px; min-height: 48px; padding: 0; margin-right: -8px; border: none; background: none; box-shadow: none; color: #f6eee8; }
+.viewer-close .icon { width: 28px; height: 28px; stroke-width: 1.6; }
+.viewer-close:active { background: rgba(255, 255, 255, 0.08); }
+.viewer-photo { flex: 1 1 auto; min-height: 240px; margin: 4px 0 var(--s4); border-radius: var(--r-md); overflow: hidden; background: #000; display: grid; place-items: center; }
+.viewer-photo img { width: 100%; height: 100%; max-height: 64vh; object-fit: contain; display: block; }
+.viewer h2 { color: #fff; font-size: 28px; margin: 0 0 4px; }
+.viewer .by { color: #cfc2b8; font-size: var(--fs-sm); margin: 0 0 var(--s2); }
+.viewer .say { font-size: 17px; line-height: 1.45; margin: 0 0 var(--s4); white-space: pre-line; overflow-wrap: anywhere; }
+.viewer .btn.primary { flex: none; }
+.viewer .viewer-delete { color: #cfc2b8; margin-top: var(--s2); flex: none; }
+/* "Not Mom? Make this phone your own" on the You page. */
+.switch-form { margin-bottom: var(--s4); }

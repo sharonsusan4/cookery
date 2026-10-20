@@ -203,6 +203,23 @@ squares with deep green icons and names.
   ✓); Open (brass), Add to plan (outline with a brass calendar), and the quiet
   "✓ On today's lunch ×2" note; the "Move to" chooser in a raised card; the
   ingredients as a raised card with hairlines and brass dots.
+- **Cooked it** (on a recipe, after the ingredients and notes): "Cooked it" in
+  Gloock with a quiet "2 people", an outlined **I cooked this** with a camera
+  icon, then each post as a white card: the name bold (Mom's in coral), "3
+  days ago" quiet, the words at 17px, the photo 4:3 with 12px corners, and a
+  quiet grey Delete on your own. Nothing posted yet: one quiet line.
+- **I cooked this** (`#cook/<row>`): the dish in coral small caps, "I cooked
+  this" in Gloock, a dashed **Add a photo** (or the photo, with Change photo /
+  Take out photo), "How did it turn out?", **Post**, and one quiet line saying
+  everyone sees it with your name.
+- **Cooked tab**: "Cooked" in Gloock, one line under it, Everyone / Mine as a
+  `.segmented` switch, then two square photos a row with 12px corners, the
+  dish 15.5px/600 and "Anu · yesterday" quiet under each. In Mine a post with
+  no photo shows the dish's own tinted icon tile. No likes, no counts.
+- **A photo opened large** (`#photo/<id>`): the one dark screen, near-black
+  around the photo (shown whole, not cropped) like a phone's own gallery; a ✕
+  top right; the dish in Gloock (white), the name and when, the words, then
+  **Go to recipe** (coral) and a quiet Delete on your own. No bar.
 - **Messages** (`.toast`): a cream card with deep green text above the bar,
   the action ("Undo", "Change") underlined in `--ink-link`.
 - **Welcome ("Welcome!", name + family code) and `#signin`**, notices: no

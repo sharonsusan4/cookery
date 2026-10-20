@@ -7,9 +7,12 @@
 -- "Quick & easy" / "Gourmet" needs 003_effort.sql, one set up before the meal
 -- plan needs 004_meal_plan.sql, one set up before guest mode needs
 -- 005_guests.sql, one set up before "Shows in" needs 006_meals.sql, one set
--- up before a dish could be planned twice needs 007_plan_repeats.sql, and one
--- set up before the Naadan and One pot collections needs 008_tags.sql; this
--- file already includes everything in all of them. Needs Postgres 15 or newer.
+-- up before a dish could be planned twice needs 007_plan_repeats.sql, one
+-- set up before the Naadan and One pot collections needs 008_tags.sql, and
+-- 009_family_code.sql, 010_admin.sql, 011_private_notes.sql, 012_cooked.sql,
+-- 013_likes_names.sql, 014_hardening.sql and 015_photo_upload_fix.sql follow in
+-- the same way; this file already includes everything in all of
+-- them. Needs Postgres 15 or newer.
 
 -- ---------- recipes ----------
 
@@ -106,8 +109,13 @@ create trigger recipes_keep_family
 
 -- Add Mom's email and your own here (Table Editor > allowed_users > Insert row).
 -- Signing in is not enough on its own: the email must also be on this list.
+-- admin: Sharon, who alone sees who came in (Visitors) and removes guests or
+-- anyone's post (010). name: what their "I cooked this" posts say, "Mom" or
+-- "Sharon" (012); empty says "Family".
 create table public.allowed_users (
-  email text primary key
+  email text primary key,
+  admin boolean not null default false,
+  name text
 );
 
 -- Nobody reads this table through the app; only the check below uses it.
@@ -131,6 +139,22 @@ $$;
 
 revoke execute on function public.is_allowed() from public, anon;
 grant execute on function public.is_allowed() to authenticated;
+
+-- True when the signed-in person is on the allowed list and marked admin (Sharon).
+create function public.is_admin() returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select exists (
+    select 1 from public.allowed_users
+    where lower(trim(email)) = lower(auth.jwt() ->> 'email') and admin
+  );
+$$;
+
+revoke execute on function public.is_admin() from public, anon;
+grant execute on function public.is_admin() to authenticated;
 
 -- ---------- guests (family members who came in with the family code) ----------
 -- They are Supabase anonymous users: no email, no password. Typing their name
@@ -216,14 +240,14 @@ create table public.guests (
   last_seen timestamptz not null default now()
 );
 
--- Only Mom and Sharon read it (the Visitors page); the functions below write it.
+-- Only Sharon reads it (the Visitors page); the functions below write it.
 alter table public.guests enable row level security;
 revoke all on public.guests from anon, authenticated;
 grant select on public.guests to authenticated;
 
-create policy "Allowed users can see guests"
+create policy "Admins can see guests"
   on public.guests for select to authenticated
-  using ((select public.is_allowed()));
+  using ((select public.is_admin()));
 
 -- True when the signed-in person is a guest (joined, and not removed).
 create function public.is_guest() returns boolean
@@ -390,7 +414,7 @@ $$;
 revoke execute on function public.get_family_code() from public, anon;
 grant execute on function public.get_family_code() to authenticated;
 
--- Allowed users only: takes a guest out. Their rows stay, hidden.
+-- Sharon only: takes a guest out. Their rows stay, hidden.
 create function public.remove_guest(guest uuid) returns boolean
 language plpgsql
 volatile
@@ -398,8 +422,8 @@ security definer
 set search_path = ''
 as $$
 begin
-  if not public.is_allowed() then
-    raise exception 'Only allowed users can remove a guest' using errcode = '42501';
+  if not public.is_admin() then
+    raise exception 'Only Sharon can remove a guest' using errcode = '42501';
   end if;
   delete from public.guests g where g.user_id = remove_guest.guest;
   return found;
@@ -429,11 +453,11 @@ create policy "Allowed users can change recipes"
   using ((select public.is_allowed()))
   with check ((select public.is_allowed()));
 
--- Guests: Mom's recipes and their own to read; only their own to add, change
--- or delete.
-create policy "Guests can read family and own recipes"
+-- Guests: only their own to read, add, change or delete here. They read Mom's
+-- through family_recipes() below, which leaves out her notes (011).
+create policy "Guests can read their own recipes"
   on public.recipes for select to authenticated
-  using ((owner is null or owner = (select auth.uid())) and (select public.is_guest()));
+  using (owner = (select auth.uid()) and (select public.is_guest()));
 
 create policy "Guests can add their own recipes"
   on public.recipes for insert to authenticated
@@ -460,6 +484,39 @@ grant select, insert, update, delete on public.recipes to authenticated;
 -- gets an empty answer, which still counts as the database being used.
 grant select on public.recipes to anon;
 revoke insert, update, delete on public.recipes from anon;
+
+-- Mom's recipes, without her notes, for guests (and allowed users, though
+-- the app gives them the table). Nobody else gets any rows.
+create function public.family_recipes()
+returns table (
+  id bigint,
+  name text,
+  category text,
+  status text,
+  link text,
+  link_key text,
+  source text,
+  ingredients text[],
+  last_cooked_at timestamptz,
+  photo_path text,
+  effort text,
+  meals text[],
+  tags text[],
+  owner uuid
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select r.id, r.name, r.category, r.status, r.link, r.link_key, r.source, r.ingredients,
+         r.last_cooked_at, r.photo_path, r.effort, r.meals, r.tags, r.owner
+  from public.recipes r
+  where r.owner is null and (public.is_guest() or public.is_allowed());
+$$;
+
+revoke execute on function public.family_recipes() from public, anon;
+grant execute on function public.family_recipes() to authenticated;
 
 -- ---------- shopping list ----------
 
@@ -600,3 +657,799 @@ create policy "Allowed users can replace dish photos"
 create policy "Allowed users can remove dish photos"
   on storage.objects for delete to authenticated
   using (bucket_id = 'dish-photos' and (select public.is_allowed()));
+
+-- ---------- "I cooked this" (012) ----------
+-- Anyone in the app (Mom, Sharon, guests) can say they cooked one of Mom's
+-- recipes, with a comment, a photo, both or neither. Everyone in the app sees
+-- every post; each person deletes their own, Sharon anyone's; nobody edits
+-- one. The name comes from the database (guests.name, allowed_users.name),
+-- never from the phone. Photos live under cooked/<user id>/ in dish-photos.
+
+create table public.cooked (
+  id bigint generated always as identity primary key,
+  -- Mom's recipe. If one is ever deleted, its posts go with it.
+  recipe_id bigint not null references public.recipes (id) on delete cascade,
+  -- Who posted it. Set by the database (cooked_fill below).
+  user_id uuid references auth.users (id) on delete set null,
+  name text not null default '',
+  member boolean not null default false, -- Mom or Sharon (allowed users), not a guest
+  comment text not null default '' check (char_length(comment) <= 1000),
+  -- A path in the dish-photos bucket (cooked/<user id>/<file>.jpg), or null.
+  photo_path text,
+  created_at timestamptz not null default now()
+);
+
+create index cooked_recipe_id_idx on public.cooked (recipe_id);
+create index cooked_created_at_idx on public.cooked (created_at desc);
+create index cooked_user_id_idx on public.cooked (user_id);
+
+-- The signed-in person's name: '' when nobody, 'Family' for an allowed user
+-- with no name set.
+create function public.my_name() returns text
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  uid uuid := auth.uid();
+  found_name text;
+begin
+  if uid is null then
+    return '';
+  end if;
+  if public.is_allowed() then
+    select nullif(trim(a.name), '') into found_name from public.allowed_users a
+    where lower(trim(a.email)) = lower(auth.jwt() ->> 'email') limit 1;
+    return coalesce(found_name, 'Family');
+  end if;
+  select g.name into found_name from public.guests g where g.user_id = uid;
+  return coalesce(found_name, '');
+end;
+$$;
+
+revoke execute on function public.my_name() from public, anon;
+grant execute on function public.my_name() to authenticated;
+
+-- Fills in who and when, and checks the post is on one of Mom's recipes and
+-- the photo is in the poster's own folder. Only for people using the app (a
+-- request with a sign-in token); the SQL Editor can still write any row as it
+-- is. (current_user can't tell them apart here: in a security definer
+-- function it is always the owner.)
+create function public.cooked_fill() returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  uid uuid := auth.uid();
+begin
+  if coalesce(auth.jwt() ->> 'role', '') not in ('anon', 'authenticated') then
+    return new;
+  end if;
+  if uid is null then
+    raise exception 'Sign in first' using errcode = '42501';
+  end if;
+  if not exists (select 1 from public.recipes r where r.id = new.recipe_id and r.owner is null) then
+    raise exception 'Posts are only on Mom''s recipes' using errcode = '42501';
+  end if;
+  new.photo_path := nullif(trim(coalesce(new.photo_path, '')), '');
+  if new.photo_path is not null and new.photo_path not like 'cooked/' || uid::text || '/%' then
+    raise exception 'The photo must be in your own folder' using errcode = '42501';
+  end if;
+  new.user_id := uid;
+  new.created_at := now();
+  new.comment := trim(coalesce(new.comment, ''));
+  if public.is_allowed() then
+    new.member := true;
+    new.name := coalesce((
+      select nullif(trim(a.name), '') from public.allowed_users a
+      where lower(trim(a.email)) = lower(auth.jwt() ->> 'email')
+      limit 1), 'Family');
+  else
+    new.member := false;
+    new.name := coalesce((select g.name from public.guests g where g.user_id = uid), '');
+  end if;
+  return new;
+end;
+$$;
+
+revoke execute on function public.cooked_fill() from public, anon, authenticated;
+
+create trigger cooked_fill
+  before insert on public.cooked
+  for each row execute function public.cooked_fill();
+
+alter table public.cooked enable row level security;
+
+create policy "Everyone in the app can see posts"
+  on public.cooked for select to authenticated
+  using ((select public.is_allowed()) or (select public.is_guest()));
+
+create policy "Everyone in the app can post"
+  on public.cooked for insert to authenticated
+  with check (((select public.is_allowed()) or (select public.is_guest())) and user_id = (select auth.uid()));
+
+create policy "People delete their own posts, Sharon any"
+  on public.cooked for delete to authenticated
+  using ((user_id = (select auth.uid()) and ((select public.is_allowed()) or (select public.is_guest())))
+         or (select public.is_admin()));
+
+-- Only these three come from the phone; the trigger sets the rest. No update.
+revoke all on public.cooked from anon, authenticated;
+grant select, delete on public.cooked to authenticated;
+grant insert (recipe_id, comment, photo_path) on public.cooked to authenticated;
+
+-- Guests may add and remove photos in their own cooked/<user id>/ folder.
+-- (Allowed users can already add and remove anything in the bucket, and
+-- everyone in the app can already see it.)
+create policy "Guests can add their cooked photos"
+  on storage.objects for insert to authenticated
+  with check (bucket_id = 'dish-photos' and (select public.is_guest())
+              and (storage.foldername(name))[1] = 'cooked'
+              and (storage.foldername(name))[2] = (select auth.uid())::text);
+
+create policy "Guests can remove their cooked photos"
+  on storage.objects for delete to authenticated
+  using (bucket_id = 'dish-photos' and (select public.is_guest())
+         and (storage.foldername(name))[1] = 'cooked'
+         and (storage.foldername(name))[2] = (select auth.uid())::text);
+
+-- ---------- likes and names (013) ----------
+
+-- A guest renames themselves: 1 to 40 characters once tidied. Returns the
+-- name as saved, or null when they aren't a guest.
+create function public.rename_me(name text) returns text
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+#variable_conflict use_column
+declare
+  uid uuid := auth.uid();
+  clean_name text := trim(left(trim(regexp_replace(coalesce(rename_me.name, ''), '[[:space:][:cntrl:]]+', ' ', 'g')), 40));
+begin
+  if uid is null or public.is_allowed() or not public.is_guest() then
+    return null;
+  end if;
+  if clean_name = '' then
+    raise exception 'Type a name first.' using errcode = '22023';
+  end if;
+  update public.guests g set name = clean_name where g.user_id = uid;
+  update public.cooked c set name = clean_name where c.user_id = uid and not c.member;
+  update public.cooked_likes l set name = clean_name where l.user_id = uid;
+  return clean_name;
+end;
+$$;
+
+create table public.cooked_likes (
+  post_id bigint not null references public.cooked (id) on delete cascade,
+  user_id uuid not null references auth.users (id) on delete cascade,
+  name text not null default '',
+  created_at timestamptz not null default now(),
+  primary key (post_id, user_id)
+);
+
+create index cooked_likes_user_id_idx on public.cooked_likes (user_id);
+
+-- Fills in who and when; only for people using the app (see cooked_fill in 012).
+create function public.cooked_like_fill() returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if coalesce(auth.jwt() ->> 'role', '') not in ('anon', 'authenticated') then
+    return new;
+  end if;
+  if auth.uid() is null then
+    raise exception 'Sign in first' using errcode = '42501';
+  end if;
+  new.user_id := auth.uid();
+  new.created_at := now();
+  new.name := public.my_name();
+  return new;
+end;
+$$;
+
+revoke execute on function public.cooked_like_fill() from public, anon, authenticated;
+
+create trigger cooked_like_fill
+  before insert on public.cooked_likes
+  for each row execute function public.cooked_like_fill();
+
+alter table public.cooked_likes enable row level security;
+
+create policy "Everyone in the app can see likes"
+  on public.cooked_likes for select to authenticated
+  using ((select public.is_allowed()) or (select public.is_guest()));
+
+create policy "Everyone in the app can like"
+  on public.cooked_likes for insert to authenticated
+  with check (((select public.is_allowed()) or (select public.is_guest())) and user_id = (select auth.uid()));
+
+create policy "People take back their own like"
+  on public.cooked_likes for delete to authenticated
+  using (user_id = (select auth.uid()));
+
+revoke all on public.cooked_likes from anon, authenticated;
+grant select, delete on public.cooked_likes to authenticated;
+grant insert (post_id) on public.cooked_likes to authenticated;
+
+-- ---- "Not Mom?": hand a phone over from Mom's account to its own guest ----
+
+create table private.handovers (
+  token uuid primary key default gen_random_uuid(),
+  from_user uuid not null,
+  name text not null,
+  created_at timestamptz not null default now(),
+  used_at timestamptz
+);
+alter table private.handovers enable row level security;
+revoke all on private.handovers from public, anon, authenticated;
+
+-- Mom's (or Sharon's) account, on the phone that's switching: a token for
+-- finish_handover(), good for 15 minutes.
+create function public.start_handover(name text) returns uuid
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+#variable_conflict use_column
+declare
+  clean_name text := trim(left(trim(regexp_replace(coalesce(start_handover.name, ''), '[[:space:][:cntrl:]]+', ' ', 'g')), 40));
+  t uuid;
+begin
+  if auth.uid() is null or not public.is_allowed() then
+    raise exception 'Only Mom''s and Sharon''s accounts can do this' using errcode = '42501';
+  end if;
+  if clean_name = '' then
+    raise exception 'Type a name first.' using errcode = '22023';
+  end if;
+  delete from private.handovers h where h.created_at < now() - interval '1 day';
+  insert into private.handovers (from_user, name) values (auth.uid(), clean_name) returning token into t;
+  return t;
+end;
+$$;
+
+revoke execute on function public.start_handover(text) from public, anon;
+grant execute on function public.start_handover(text) to authenticated;
+
+-- The new guest, right after joining: moves the posts on that account that
+-- carry the name they typed (not Mom's own, member = false), and those posts'
+-- likes by that account, to them. Returns how many posts moved; 0 for a used,
+-- old or unknown token.
+create function public.finish_handover(token uuid) returns integer
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+#variable_conflict use_column
+declare
+  uid uuid := auth.uid();
+  h private.handovers;
+  moved integer := 0;
+  guest_name text;
+begin
+  if uid is null or public.is_allowed() or not public.is_guest() then
+    return 0;
+  end if;
+  select * into h from private.handovers x
+  where x.token = finish_handover.token and x.used_at is null and x.created_at > now() - interval '15 minutes'
+  for update;
+  if not found then
+    return 0;
+  end if;
+  update private.handovers x set used_at = now() where x.token = h.token;
+  select g.name into guest_name from public.guests g where g.user_id = uid;
+  update public.cooked c set user_id = uid, name = coalesce(guest_name, c.name)
+  where c.user_id = h.from_user and not c.member and lower(trim(c.name)) = lower(h.name);
+  get diagnostics moved = row_count;
+  update public.cooked_likes l set user_id = uid, name = coalesce(guest_name, l.name)
+  where l.user_id = h.from_user and lower(trim(l.name)) = lower(h.name);
+  return moved;
+end;
+$$;
+
+revoke execute on function public.finish_handover(uuid) from public, anon;
+grant execute on function public.finish_handover(uuid) to authenticated;
+
+-- rename_me() above uses cooked_likes, so it's granted once the table exists.
+revoke execute on function public.rename_me(text) from public, anon;
+grant execute on function public.rename_me(text) to authenticated;
+
+-- ---------- hardening after the security check (014) ----------
+-- Applied on top of everything above (it replaces some of it: join_family,
+-- the allowed-user policies, remove_guest, cooked_fill, rename_me, the
+-- handover functions and family_recipes).
+
+-- ---------- 1. joining ----------
+
+alter table private.join_failures add column if not exists ip text;
+create index if not exists join_failures_ip_at_idx on private.join_failures (ip, at);
+
+-- The caller's network address as Supabase's gateway (Cloudflare) passes it on,
+-- or null when there is none (e.g. the SQL Editor).
+create or replace function private.client_ip() returns text
+language sql
+stable
+set search_path = ''
+as $$
+  select nullif(trim(coalesce(
+    (nullif(current_setting('request.headers', true), '')::json ->> 'cf-connecting-ip'),
+    (nullif(current_setting('request.headers', true), '')::json ->> 'x-real-ip'),
+    split_part(nullif(current_setting('request.headers', true), '')::json ->> 'x-forwarded-for', ',', 1)
+  )), '');
+$$;
+
+revoke execute on function private.client_ip() from public, anon, authenticated;
+
+-- Names nobody can join or rename to: Mom's and Sharon's (allowed_users.name).
+create or replace function private.member_name_taken(candidate text) returns boolean
+language sql
+stable
+set search_path = ''
+as $$
+  select exists (
+    select 1 from public.allowed_users a
+    where nullif(trim(a.name), '') is not null and lower(trim(a.name)) = lower(trim(candidate))
+  );
+$$;
+
+revoke execute on function private.member_name_taken(text) from public, anon, authenticated;
+
+create or replace function public.join_family(code text, name text) returns boolean
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+#variable_conflict use_column
+declare
+  uid uuid := auth.uid();
+  caller_ip text := private.client_ip();
+  current_code text;
+  clean_name text;
+begin
+  if uid is null or public.is_allowed() then
+    return false;
+  end if;
+
+  -- Wrong codes from this session, or from this device's network address,
+  -- stop that session or device trying for a while. Nobody else is affected.
+  if (select count(*) from private.join_failures f
+      where f.user_id = uid and f.at > now() - interval '15 minutes') >= 10 then
+    return false;
+  end if;
+  if caller_ip is not null and (select count(*) from private.join_failures f
+      where f.ip = caller_ip and f.at > now() - interval '1 hour') >= 10 then
+    raise exception 'Too many wrong family codes from this phone. Try again in an hour.' using errcode = 'P0001';
+  end if;
+
+  select fc.code into current_code from private.family_code fc where fc.id;
+
+  -- Compared as hashes, so how long the comparison takes says nothing about the code.
+  if current_code is null or
+     sha256(convert_to(private.clean_family_code(join_family.code), 'UTF8')) <>
+     sha256(convert_to(private.clean_family_code(current_code), 'UTF8')) then
+    insert into private.join_failures (user_id, ip) values (uid, caller_ip);
+    delete from private.join_failures f where f.at < now() - interval '1 day';
+    -- A flood of wrong codes from many places: someone is guessing. Wrong
+    -- codes pause for an hour; the right code still gets in (it's checked above).
+    if (select count(*) from private.join_failures f where f.at > now() - interval '1 hour') >= 300 then
+      raise exception 'Too many wrong family codes just now. Try again later.' using errcode = 'P0001';
+    end if;
+    return false;
+  end if;
+
+  clean_name := trim(left(trim(regexp_replace(coalesce(join_family.name, ''), '[[:space:][:cntrl:]]+', ' ', 'g')), 40));
+  if clean_name = '' then
+    return false;
+  end if;
+  if private.member_name_taken(clean_name) then
+    raise exception 'That name is taken. Add your surname or a nickname.' using errcode = '22023';
+  end if;
+
+  insert into public.guests as g (user_id, name)
+  values (uid, clean_name)
+  on conflict (user_id) do update set name = excluded.name, last_seen = now();
+  return true;
+end;
+$$;
+
+revoke execute on function public.join_family(text, text) from public, anon;
+grant execute on function public.join_family(text, text) to authenticated;
+
+-- ---------- 3. Mom's and Sharon's accounts: the household's rows only ----------
+
+drop policy if exists "Allowed users can read recipes" on public.recipes;
+create policy "Allowed users can read recipes"
+  on public.recipes for select to authenticated
+  using (owner is null and (select public.is_allowed()));
+
+drop policy if exists "Allowed users can add recipes" on public.recipes;
+create policy "Allowed users can add recipes"
+  on public.recipes for insert to authenticated
+  with check (owner is null and (select public.is_allowed()));
+
+drop policy if exists "Allowed users can change recipes" on public.recipes;
+create policy "Allowed users can change recipes"
+  on public.recipes for update to authenticated
+  using (owner is null and (select public.is_allowed()))
+  with check (owner is null and (select public.is_allowed()));
+
+drop policy if exists "Allowed users can read the shopping list" on public.shopping_items;
+create policy "Allowed users can read the shopping list"
+  on public.shopping_items for select to authenticated
+  using (guest_id is null and (select public.is_allowed()));
+drop policy if exists "Allowed users can add to the shopping list" on public.shopping_items;
+create policy "Allowed users can add to the shopping list"
+  on public.shopping_items for insert to authenticated
+  with check (guest_id is null and (select public.is_allowed()));
+drop policy if exists "Allowed users can tick the shopping list" on public.shopping_items;
+create policy "Allowed users can tick the shopping list"
+  on public.shopping_items for update to authenticated
+  using (guest_id is null and (select public.is_allowed()))
+  with check (guest_id is null and (select public.is_allowed()));
+drop policy if exists "Allowed users can clear the shopping list" on public.shopping_items;
+create policy "Allowed users can clear the shopping list"
+  on public.shopping_items for delete to authenticated
+  using (guest_id is null and (select public.is_allowed()));
+
+drop policy if exists "Allowed users can read the meal plan" on public.meal_plan;
+create policy "Allowed users can read the meal plan"
+  on public.meal_plan for select to authenticated
+  using (guest_id is null and (select public.is_allowed()));
+drop policy if exists "Allowed users can add to the meal plan" on public.meal_plan;
+create policy "Allowed users can add to the meal plan"
+  on public.meal_plan for insert to authenticated
+  with check (guest_id is null and (select public.is_allowed()));
+drop policy if exists "Allowed users can take dishes off the meal plan" on public.meal_plan;
+create policy "Allowed users can take dishes off the meal plan"
+  on public.meal_plan for delete to authenticated
+  using (guest_id is null and (select public.is_allowed()));
+
+-- Sharon's People page: how many dishes each guest planned and recipes they
+-- added, without reading the rows themselves.
+create or replace function public.guest_counts()
+returns table (user_id uuid, planned bigint, added bigint)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select g.user_id,
+         (select count(*) from public.meal_plan p where p.guest_id = g.user_id),
+         (select count(*) from public.recipes r where r.owner = g.user_id)
+  from public.guests g
+  where public.is_admin();
+$$;
+
+revoke execute on function public.guest_counts() from public, anon;
+grant execute on function public.guest_counts() to authenticated;
+
+-- ---------- 4. removing a guest, and leaving ----------
+
+-- Sharon only. Takes the guest off the list; with with_posts, also deletes
+-- their posts and likes. Returns the photo paths of the deleted posts so the
+-- app can remove the files (Sharon may remove any photo).
+drop function if exists public.remove_guest(uuid);
+create or replace function public.remove_guest(guest uuid, with_posts boolean default false)
+returns setof text
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+begin
+  if not public.is_admin() then
+    raise exception 'Only Sharon can remove a guest' using errcode = '42501';
+  end if;
+  delete from public.guests g where g.user_id = remove_guest.guest;
+  if with_posts then
+    delete from public.cooked_likes l where l.user_id = remove_guest.guest;
+    return query
+      delete from public.cooked c where c.user_id = remove_guest.guest and not c.member
+      returning c.photo_path;
+  end if;
+  return;
+end;
+$$;
+
+revoke execute on function public.remove_guest(uuid, boolean) from public, anon;
+grant execute on function public.remove_guest(uuid, boolean) to authenticated;
+
+-- A guest leaving guest mode takes themselves off the list (their posts stay).
+create or replace function public.leave_guest() returns boolean
+language sql
+volatile
+security definer
+set search_path = ''
+as $$
+  delete from public.guests g where g.user_id = (select auth.uid()) returning true;
+$$;
+
+revoke execute on function public.leave_guest() from public, anon;
+grant execute on function public.leave_guest() to authenticated;
+
+-- ---------- 5 and 12. what the API may write ----------
+
+revoke insert, update on public.recipes from authenticated;
+grant insert (name, category, status, link, link_key, source, notes, protein, ingredients,
+              last_cooked_at, photo_path, effort, meals, tags, owner) on public.recipes to authenticated;
+grant update (name, category, status, link, link_key, source, notes, protein, ingredients,
+              last_cooked_at, photo_path, effort, meals, tags) on public.recipes to authenticated;
+
+revoke truncate, references, trigger on all tables in schema public from anon, authenticated;
+
+-- ---------- 7 and 10. limits on what guests store ----------
+
+-- Links: only web addresses (checked for new and changed rows; every
+-- existing link already is one).
+alter table public.recipes drop constraint if exists recipes_link_web;
+alter table public.recipes add constraint recipes_link_web check (link ~* '^https?://') not valid;
+
+-- Guests' own rows: sizes, and how many each guest keeps. Mom's and Sharon's
+-- rows are left as they are.
+create or replace function public.guest_limits() returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  uid uuid := auth.uid();
+begin
+  if coalesce(auth.jwt() ->> 'role', '') not in ('anon', 'authenticated') or public.is_allowed() then
+    return new;
+  end if;
+  if tg_table_name = 'recipes' then
+    if char_length(new.name) > 200 or char_length(new.category) > 100 or char_length(new.status) > 50
+       or char_length(new.link) > 2000 or char_length(new.source) > 50 or char_length(new.notes) > 5000
+       or coalesce(array_length(new.ingredients, 1), 0) > 100
+       or exists (select 1 from unnest(coalesce(new.ingredients, '{}')) i where char_length(i) > 200)
+       or coalesce(array_length(new.meals, 1), 0) > 10 or coalesce(array_length(new.tags, 1), 0) > 10 then
+      raise exception 'That recipe is too long to save.' using errcode = '22001';
+    end if;
+    if tg_op = 'INSERT' and (select count(*) from public.recipes r where r.owner = uid) >= 300 then
+      raise exception 'You have saved the most recipes a guest can.' using errcode = '54000';
+    end if;
+  elsif tg_table_name = 'shopping_items' then
+    if char_length(new.item) > 200 then
+      raise exception 'That item is too long.' using errcode = '22001';
+    end if;
+    if tg_op = 'INSERT' and (select count(*) from public.shopping_items s where s.guest_id = uid) >= 500 then
+      raise exception 'Your list is full.' using errcode = '54000';
+    end if;
+  elsif tg_table_name = 'meal_plan' then
+    if tg_op = 'INSERT' and (select count(*) from public.meal_plan p where p.guest_id = uid) >= 1000 then
+      raise exception 'Your plan is full.' using errcode = '54000';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+revoke execute on function public.guest_limits() from public, anon, authenticated;
+
+drop trigger if exists recipes_guest_limits on public.recipes;
+create trigger recipes_guest_limits before insert or update on public.recipes
+  for each row execute function public.guest_limits();
+drop trigger if exists shopping_items_guest_limits on public.shopping_items;
+create trigger shopping_items_guest_limits before insert or update on public.shopping_items
+  for each row execute function public.guest_limits();
+drop trigger if exists meal_plan_guest_limits on public.meal_plan;
+create trigger meal_plan_guest_limits before insert on public.meal_plan
+  for each row execute function public.guest_limits();
+
+-- Photos: 1.5 MB each at most, and at most 100 per guest.
+update storage.buckets set file_size_limit = 1572864 where id = 'dish-photos';
+
+drop policy if exists "Guests can add their cooked photos" on storage.objects;
+create policy "Guests can add their cooked photos"
+  on storage.objects for insert to authenticated
+  with check (bucket_id = 'dish-photos' and (select public.is_guest())
+              and (storage.foldername(name))[1] = 'cooked'
+              and (storage.foldername(name))[2] = (select auth.uid())::text
+              and (select count(*) from storage.objects o
+                   where o.bucket_id = 'dish-photos' and (storage.foldername(o.name))[1] = 'cooked'
+                     and (storage.foldername(o.name))[2] = (select auth.uid())::text) < 100);
+
+-- ---------- 6 and 17. posts ----------
+
+create or replace function public.cooked_fill() returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  uid uuid := auth.uid();
+begin
+  if coalesce(auth.jwt() ->> 'role', '') not in ('anon', 'authenticated') then
+    return new;
+  end if;
+  if uid is null then
+    raise exception 'Sign in first' using errcode = '42501';
+  end if;
+  if not exists (select 1 from public.recipes r where r.id = new.recipe_id and r.owner is null) then
+    raise exception 'Posts are only on Mom''s recipes' using errcode = '42501';
+  end if;
+  new.photo_path := nullif(trim(coalesce(new.photo_path, '')), '');
+  if new.photo_path is not null and new.photo_path !~ ('^cooked/' || uid::text || '/[0-9]{10,16}\.jpg$') then
+    raise exception 'The photo must be in your own folder' using errcode = '42501';
+  end if;
+  new.user_id := uid;
+  new.created_at := now();
+  new.comment := trim(coalesce(new.comment, ''));
+  if public.is_allowed() then
+    new.member := true;
+    new.name := coalesce((
+      select nullif(trim(a.name), '') from public.allowed_users a
+      where lower(trim(a.email)) = lower(auth.jwt() ->> 'email')
+      limit 1), 'Family');
+  else
+    if (select count(*) from public.cooked c where c.user_id = uid and c.created_at > now() - interval '1 day') >= 20 then
+      raise exception 'That''s a lot of posts today. Try again tomorrow.' using errcode = '54000';
+    end if;
+    new.member := false;
+    new.name := coalesce((select g.name from public.guests g where g.user_id = uid), '');
+  end if;
+  return new;
+end;
+$$;
+
+revoke execute on function public.cooked_fill() from public, anon, authenticated;
+
+create or replace function public.rename_me(name text) returns text
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+#variable_conflict use_column
+declare
+  uid uuid := auth.uid();
+  clean_name text := trim(left(trim(regexp_replace(coalesce(rename_me.name, ''), '[[:space:][:cntrl:]]+', ' ', 'g')), 40));
+begin
+  if uid is null or public.is_allowed() or not public.is_guest() then
+    return null;
+  end if;
+  if clean_name = '' then
+    raise exception 'Type a name first.' using errcode = '22023';
+  end if;
+  if private.member_name_taken(clean_name) then
+    raise exception 'That name is taken. Add your surname or a nickname.' using errcode = '22023';
+  end if;
+  update public.guests g set name = clean_name where g.user_id = uid;
+  update public.cooked c set name = clean_name where c.user_id = uid and not c.member;
+  update public.cooked_likes l set name = clean_name where l.user_id = uid;
+  return clean_name;
+end;
+$$;
+
+revoke execute on function public.rename_me(text) from public, anon;
+grant execute on function public.rename_me(text) to authenticated;
+
+-- ---------- 9. "Not Mom?" handover ----------
+
+create or replace function public.start_handover(name text) returns uuid
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+#variable_conflict use_column
+declare
+  clean_name text := trim(left(trim(regexp_replace(coalesce(start_handover.name, ''), '[[:space:][:cntrl:]]+', ' ', 'g')), 40));
+  t uuid;
+begin
+  if auth.uid() is null or not public.is_allowed() then
+    raise exception 'Only Mom''s and Sharon''s accounts can do this' using errcode = '42501';
+  end if;
+  if clean_name = '' then
+    raise exception 'Type a name first.' using errcode = '22023';
+  end if;
+  if lower(clean_name) = lower(public.my_name()) or private.member_name_taken(clean_name) then
+    raise exception 'Type your own name, not the account''s.' using errcode = '22023';
+  end if;
+  delete from private.handovers h where h.created_at < now() - interval '1 day';
+  insert into private.handovers (from_user, name) values (auth.uid(), clean_name) returning token into t;
+  return t;
+end;
+$$;
+
+revoke execute on function public.start_handover(text) from public, anon;
+grant execute on function public.start_handover(text) to authenticated;
+
+create or replace function public.finish_handover(token uuid) returns integer
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+#variable_conflict use_column
+declare
+  uid uuid := auth.uid();
+  h private.handovers;
+  moved integer := 0;
+  guest_name text;
+begin
+  if uid is null or public.is_allowed() or not public.is_guest() then
+    return 0;
+  end if;
+  select * into h from private.handovers x
+  where x.token = finish_handover.token and x.used_at is null and x.created_at > now() - interval '15 minutes'
+  for update;
+  if not found then
+    return 0;
+  end if;
+  update private.handovers x set used_at = now() where x.token = h.token;
+  select g.name into guest_name from public.guests g where g.user_id = uid;
+  with moved_posts as (
+    update public.cooked c set user_id = uid, name = coalesce(guest_name, c.name)
+    where c.user_id = h.from_user and not c.member and lower(trim(c.name)) = lower(h.name)
+    returning c.id
+  ), moved_likes as (
+    update public.cooked_likes l set user_id = uid, name = coalesce(guest_name, l.name)
+    where l.user_id = h.from_user and lower(trim(l.name)) = lower(h.name)
+      and l.post_id in (select id from moved_posts)
+    returning 1
+  )
+  select count(*) into moved from moved_posts;
+  return moved;
+end;
+$$;
+
+revoke execute on function public.finish_handover(uuid) from public, anon;
+grant execute on function public.finish_handover(uuid) to authenticated;
+
+-- ---------- 19. family_recipes(): not what Mom removed ----------
+
+create or replace function public.family_recipes()
+returns table (
+  id bigint, name text, category text, status text, link text, link_key text, source text,
+  ingredients text[], last_cooked_at timestamptz, photo_path text, effort text,
+  meals text[], tags text[], owner uuid
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select r.id, r.name, r.category, r.status, r.link, r.link_key, r.source, r.ingredients,
+         r.last_cooked_at, r.photo_path, r.effort, r.meals, r.tags, r.owner
+  from public.recipes r
+  where r.owner is null and (public.is_guest() or public.is_allowed())
+    and r.status !~* '^\s*not\s+interested' and r.name !~* '\mignore\M';
+$$;
+
+revoke execute on function public.family_recipes() from public, anon;
+grant execute on function public.family_recipes() to authenticated;
+
+-- ---------- photo uploads (015): the guests' photo limit without a self-referencing rule ----------
+
+-- How many photos the signed-in person has in their own cooked/<id>/ folder.
+create or replace function public.my_cooked_photo_count() returns bigint
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select count(*) from storage.objects o
+  where o.bucket_id = 'dish-photos'
+    and (storage.foldername(o.name))[1] = 'cooked'
+    and (storage.foldername(o.name))[2] = (select auth.uid())::text;
+$$;
+
+revoke execute on function public.my_cooked_photo_count() from public, anon;
+grant execute on function public.my_cooked_photo_count() to authenticated;
+
+drop policy if exists "Guests can add their cooked photos" on storage.objects;
+create policy "Guests can add their cooked photos"
+  on storage.objects for insert to authenticated
+  with check (bucket_id = 'dish-photos' and (select public.is_guest())
+              and (storage.foldername(name))[1] = 'cooked'
+              and (storage.foldername(name))[2] = (select auth.uid())::text
+              and (select public.my_cooked_photo_count()) < 100);

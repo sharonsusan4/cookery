@@ -35,3 +35,6 @@ dev/live/
 # New recipe ideas picked for her, checked against her list (her data).
 dev/new-recipes.json
 dev/new-recipes.md
+
+# Security review reports: never published (the repo is public)
+dev/security/

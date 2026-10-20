@@ -118,6 +118,19 @@ const state = {
   notice: null, // a message shown at the top of the welcome screen instead of its usual words: { title, text }
   joinPending: '', // a family code from a link opened while a guest was signed in
   visitors: null, // the Visitors page: { guests, counts, code, error, changing (the Change code box is open), codeError }
+  // The signed-in person's user id (a guest's is also state.user), to know
+  // which "I cooked this" posts are theirs.
+  uid: store.get('uid', null),
+  // Everyone's "I cooked this" posts (the cooked table, migration 012), newest first.
+  cooked: store.get('cooked', []),
+  cookedWho: 'all', // the Cooked tab: 'all' (everyone's photos) or 'mine' (everything I cooked)
+  cookDraft: null, // "I cooked this" being written: { row, blob, url, text, posting }
+  likes: store.get('likes', []), // likes on posts (cooked_likes, migration 013): { post, user, name }
+  // The name the app shows for whoever is signed in (my_name(), migration 013):
+  // "Mom", "Sharon", or a guest's own name.
+  myName: store.get('myName', ''),
+  renaming: false, // the "Change my name" box is open on the You page
+  switching: false, // the "Not Mom?" box is open on the You page
 };
 
 /** True when a family member is using the app as a guest (came in with the family code). */
@@ -135,9 +148,11 @@ const canEdit = r => (isGuest() ? isMine(r) : !r.owner);
 // have to change. Ids never shift, unlike sheet rows.
 
 const COLUMNS = 'id, name, category, status, link, source, notes, ingredients, last_cooked_at, photo_path, effort, meals, tags, owner';
-// What a guest asks for on Mom's recipes: everything but her private notes.
-// (The rules are per row, so the notes could still be asked for; the app just never does.)
+// What a guest gets of Mom's recipes: everything but her private notes. Guests
+// read them through family_recipes() (migration 011), which has no notes column
+// at all, so the notes stay private in the database, not just on screen.
 const FAMILY_COLUMNS = COLUMNS.replace(', notes', '');
+const familyRecipes = () => db().rpc('family_recipes');
 const EDITABLE = ['name', 'category', 'status', 'notes', 'ingredients', 'last_cooked_at', 'photo_path', 'meals', 'tags'];
 
 // The collections she can browse on the Recipes tab (recipes.tags, migration
@@ -232,11 +247,14 @@ async function requireSession() {
   throw new Error('Please sign in again.');
 }
 
-/** Every row of a recipes query, a page at a time. `build` adds the select and filters. */
-async function allRows(build) {
+/**
+ * Every row of a recipes query, a page at a time. `build` adds the select and
+ * filters; `source` is the recipes table, or family_recipes() for a guest.
+ */
+async function allRows(build, source = () => db().from('recipes')) {
   const all = [];
   for (let from = 0; ; from += PAGE) {
-    const page = await query(build(db().from('recipes')).order('id').range(from, from + PAGE - 1));
+    const page = await query(build(source()).order('id').range(from, from + PAGE - 1));
     all.push(...page);
     if (page.length < PAGE) return all;
   }
@@ -251,7 +269,7 @@ async function listRecipes() {
   await requireSession();
   if (!isGuest()) return (await allRows(q => q.select(COLUMNS).is('owner', null))).map(fromDb);
   const [family, own] = await Promise.all([
-    allRows(q => q.select(FAMILY_COLUMNS).is('owner', null)),
+    allRows(q => q.select(FAMILY_COLUMNS), familyRecipes),
     allRows(q => q.select(COLUMNS).eq('owner', guestId())),
   ]);
   return [...family.map(fromDb).filter(r => !isRemoved(r)), ...own.map(fromDb)].sort((a, b) => a.row - b.row);
@@ -270,10 +288,13 @@ async function addRecipe(recipe, force) {
   const key = linkKey(link);
   if (!force) {
     // Mom and Sharon only look among the family's; a guest among Mom's and their own.
-    const same = await query((isGuest()
-      ? db().from('recipes').select(FAMILY_COLUMNS)
-      : db().from('recipes').select(COLUMNS).is('owner', null)).eq('link_key', key).order('id').limit(1));
-    if (same.length) return { duplicate: true, recipe: fromDb(same[0]) };
+    const first = q => q.eq('link_key', key).order('id').limit(1);
+    const [same, own] = await Promise.all([
+      query(first(isGuest() ? familyRecipes().select(FAMILY_COLUMNS) : db().from('recipes').select(COLUMNS).is('owner', null))),
+      isGuest() ? query(first(db().from('recipes').select(COLUMNS).eq('owner', guestId()))) : [],
+    ]);
+    const found = same[0] || own[0];
+    if (found) return { duplicate: true, recipe: fromDb(found) };
   }
   const row = {
     ...(isGuest() ? { owner: guestId() } : {}),
@@ -716,7 +737,7 @@ function planChanged() {
 // Pictures never hold up the screen: they're filled in when their link arrives.
 
 const PHOTO_BUCKET = 'dish-photos';
-const PHOTO_URL_SECONDS = 6 * 60 * 60;
+const PHOTO_URL_SECONDS = 60 * 60; // an hour: a forwarded photo link soon stops working
 const PHOTO_MAX = 1080; // longest side, in pixels: plenty for a phone screen
 const photoUrls = new Map(); // path -> { url, until }
 const photoMissing = new Map(); // path -> time to stop skipping it
@@ -851,6 +872,441 @@ async function savePhoto(r, file, btn) {
   }
 }
 
+// ---------- "I cooked this" and the Cooked tab ----------
+// Anyone in the app (Mom, Sharon, guests) can say they cooked one of Mom's
+// recipes, with a comment, a photo, both or neither (the cooked table,
+// migration 012). The database fills in their name and the time. A recipe's
+// page lists what people said; the Cooked tab shows everyone's photos, or
+// everything I cooked ("Mine"); tapping a photo opens it large (#photo/<id>)
+// with "Go to recipe". For Mom and Sharon a post also marks the dish as made
+// today, in place of the old "I made this today".
+
+const COOKED_COLUMNS = 'id, recipe_id, user_id, name, member, comment, photo_path, created_at';
+
+function fromCookedDb(d) {
+  return {
+    id: d.id,
+    row: d.recipe_id,
+    user: d.user_id || null,
+    name: String(d.name || '').trim(),
+    member: !!d.member,
+    comment: String(d.comment || '').trim(),
+    photo: d.photo_path || '',
+    at: d.created_at,
+  };
+}
+
+/** Everyone's posts, newest first (the last 500, far more than the family will make). */
+async function loadCooked() {
+  if (!state.user) return;
+  try {
+    await requireSession();
+    const [rows, likes] = await Promise.all([
+      query(db().from('cooked').select(COOKED_COLUMNS).order('created_at', { ascending: false }).limit(500)),
+      // Before migration 013 there are no likes yet: the posts still show.
+      query(db().from('cooked_likes').select('post_id, user_id, name').limit(5000)).catch(() => null),
+    ]);
+    const deleting = pendingPostDelete && pendingPostDelete.post.id;
+    state.cooked = rows.map(fromCookedDb).filter(p => p.id !== deleting);
+    store.set('cooked', state.cooked);
+    if (likes) {
+      state.likes = likes.map(l => ({ post: l.post_id, user: l.user_id, name: String(l.name || '').trim() }));
+      store.set('likes', state.likes);
+    }
+    const hash = location.hash || '#today';
+    if (hash === '#cooked' || hash.startsWith('#photo/') || hash === '#me') render();
+    else if (hash.startsWith('#recipe/')) refreshCookedSection();
+  } catch (e) { /* offline, or before migration 012: keep what this phone has */ }
+}
+
+/** The posts on one recipe (its page shows all of them, however many others there are). */
+async function loadRecipePosts(row) {
+  if (!state.user || !row) return;
+  try {
+    const rows = await query(db().from('cooked').select(COOKED_COLUMNS).eq('recipe_id', row).order('created_at', { ascending: false }).limit(200));
+    const deleting = pendingPostDelete && pendingPostDelete.post.id;
+    const have = new Set(state.cooked.map(p => p.id));
+    const fresh = rows.map(fromCookedDb).filter(p => !have.has(p.id) && p.id !== deleting);
+    if (!fresh.length) return;
+    state.cooked = [...state.cooked, ...fresh].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    if (location.hash === `#recipe/${row}`) refreshCookedSection();
+  } catch (e) { /* offline: what this phone has */ }
+}
+
+/** Who the app says is signed in ("Mom", "Sharon", a guest's name), from my_name(). */
+async function loadMyName() {
+  if (!state.user) return;
+  try {
+    const name = String((await query(db().rpc('my_name'))) || '').trim();
+    if (!name || name === state.myName) return;
+    state.myName = name;
+    store.set('myName', name);
+    const hash = location.hash || '#today';
+    if (hash === '#today' || hash === '#me' || hash === '#cooked' || hash.startsWith('#cook/')) render();
+  } catch (e) { /* offline, or before migration 013: keep what this phone knew */ }
+}
+
+/** The signed-in account's name: "Mom", "Sharon", or a guest's own. */
+function myDisplayName() {
+  return state.myName || (isGuest() ? String(state.guest.name || '').trim() : '') || 'You';
+}
+
+
+
+/** The round initial at the top of Today and Cooked that opens the You page. */
+function meButtonHtml() {
+  const name = myDisplayName();
+  const initial = name === 'You' ? '' : [...name][0].toUpperCase();
+  return `<a class="me-btn" href="#me" aria-label="You: ${esc(name)}">${initial ? esc(initial) : iconSvg('chef-hat')}</a>`;
+}
+
+// ---- likes ----
+
+const likesOf = id => state.likes.filter(l => String(l.post) === String(id));
+const iLike = id => likesOf(id).some(l => l.user && l.user === (state.uid || guestId()));
+
+/** "Liked by Mom", "Liked by Mom and you", "Liked by Mom, Anu and 2 others". */
+function likedByText(id) {
+  const me = state.uid || guestId();
+  const names = likesOf(id).map(l => (l.user === me ? 'you' : l.name || 'someone'));
+  if (!names.length) return '';
+  names.sort((a, b) => (a === 'you') - (b === 'you')); // "you" last reads best
+  if (names.length <= 2) return `Liked by ${names.join(' and ')}`;
+  const rest = names.length - 2;
+  return `Liked by ${names.slice(0, 2).join(', ')} and ${rest} other${rest === 1 ? '' : 's'}`;
+}
+
+function likeHtml(p) {
+  const n = likesOf(p.id).length, mine = iLike(p.id);
+  return `<div class="like-row" data-like-row="${p.id}">
+    <button type="button" class="like-btn" data-like="${p.id}" aria-pressed="${mine}" aria-label="${mine ? 'Liked' : 'Like'}${n ? `, ${n} like${n === 1 ? '' : 's'}` : ''}">${iconSvg('heart')}${n ? `<span>${n}</span>` : ''}</button>
+    ${n ? `<span class="liked-by">${esc(likedByText(p.id))}</span>` : ''}
+  </div>`;
+}
+
+/** Tap the heart: liked at once on screen, then saved; put back if it can't be. */
+async function toggleLike(id) {
+  const me = state.uid || guestId();
+  const post = findPost(id);
+  if (!post || !me) return;
+  const was = iLike(id);
+  const before = state.likes;
+  state.likes = was ? state.likes.filter(l => !(String(l.post) === String(id) && l.user === me))
+    : [...state.likes, { post: post.id, user: me, name: myDisplayName() }];
+  redrawLikes(id);
+  try {
+    await requireSession();
+    if (was) await query(db().from('cooked_likes').delete().eq('post_id', post.id).eq('user_id', me));
+    else {
+      const { error } = await db().from('cooked_likes').insert({ post_id: post.id });
+      if (error && error.code !== '23505') throw error; // already liked on another phone: fine
+    }
+    store.set('likes', state.likes);
+  } catch (e) {
+    state.likes = before;
+    redrawLikes(id);
+    toast(e && (e.code === '42P01' || e.code === 'PGRST205') ? 'Likes aren’t switched on yet. Ask Sharon.' : offlineMessage(e));
+  }
+}
+
+function redrawLikes(id) {
+  const p = findPost(id);
+  document.querySelectorAll(`[data-like-row="${id}"]`).forEach(el => { if (p) el.outerHTML = likeHtml(p); });
+}
+
+const findPost = id => state.cooked.find(p => String(p.id) === String(id)) || null;
+const myPost = p => !!p.user && p.user === (state.uid || guestId());
+const canDeletePost = p => myPost(p) || (state.admin && !isGuest());
+/** Posts with something to show (a comment or a photo); a bare "I cooked this" only counts as made. */
+const shownPost = p => !!(p.comment || p.photo);
+/** Only Mom's recipes have posts, never a guest's own. */
+const cookable = r => !!r && !r.owner;
+
+/** "today", "yesterday", "3 days ago", "last week", "2 months ago". */
+function agoText(iso) {
+  const then = new Date(iso);
+  if (isNaN(then)) return '';
+  const day = d => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const d = Math.max(0, Math.round((day(new Date()) - day(then)) / 86400000));
+  if (d === 0) return 'today';
+  if (d === 1) return 'yesterday';
+  if (d < 7) return `${d} days ago`;
+  if (d < 14) return 'last week';
+  if (d < 60) return `${Math.floor(d / 7)} weeks ago`;
+  if (d < 365) return `${Math.max(2, Math.floor(d / 30))} months ago`;
+  const years = Math.floor(d / 365);
+  return years === 1 ? 'a year ago' : `${years} years ago`;
+}
+
+const posterName = p => p.name || 'Someone';
+
+/** "Cooked it" on a recipe page: the button, then what people said, newest first. */
+function cookedSectionHtml(r) {
+  if (!cookable(r)) return '';
+  const posts = state.cooked.filter(p => String(p.row) === String(r.row) && shownPost(p));
+  const people = new Set(posts.map(p => p.user || p.name)).size;
+  return `
+    <div class="cooked-head"><h2 class="section">Cooked it</h2>${people ? `<span class="muted">${people} ${people === 1 ? 'person' : 'people'}</span>` : ''}</div>
+    <a class="btn block cook-btn" href="#cook/${r.row}">${iconSvg('camera')}I cooked this</a>
+    ${posts.length ? `<ul class="posts">${posts.map(postHtml).join('')}</ul>`
+      : '<p class="muted small cooked-empty">Made this? Tap above to say how it turned out, and add a photo if you like.</p>'}`;
+}
+
+function postHtml(p) {
+  return `<li class="post">
+    <p class="post-by"><b class="${p.member ? 'member' : ''}">${esc(posterName(p))}</b> ${esc(agoText(p.at))}</p>
+    ${p.comment ? `<p class="say">${esc(p.comment)}</p>` : ''}
+    ${p.photo ? `<a class="post-photo" href="#photo/${p.id}" aria-label="Open the photo">${photoImg(p.photo, '')}</a>` : ''}
+    <div class="post-foot">
+      ${likeHtml(p)}
+      ${canDeletePost(p) ? `<button type="button" class="link-btn post-delete" data-action="delete-post" data-post="${p.id}">Delete</button>` : ''}
+    </div>
+  </li>`;
+}
+
+/** Redraws the recipe page's "Cooked it" part only (new posts arrived, one was deleted). */
+function refreshCookedSection() {
+  const box = $('#r-cooked');
+  const r = findRecipe(location.hash.split('/')[1]);
+  if (!box || !r) return;
+  box.innerHTML = cookedSectionHtml(r);
+  loadPhotos();
+}
+
+// ---- "I cooked this" (#cook/<row>) ----
+
+function renderCook(row) {
+  const r = findRecipe(row);
+  if (!cookable(r)) {
+    view().innerHTML = `${backHtml()}<h1>Not found</h1><p class="muted">${state.loading ? 'Loading…' : 'That recipe isn’t in the list any more.'}</p>`;
+    return;
+  }
+  if (!state.cookDraft || String(state.cookDraft.row) !== String(r.row)) state.cookDraft = { row: String(r.row), blob: null, url: '', text: '', posting: false };
+  const d = state.cookDraft;
+  view().innerHTML = `
+    ${backHtml()}
+    <p class="meal-kicker">${esc(displayName(r))}</p>
+    <h1 class="cook-title">I cooked this</h1>
+    <div class="add-photo">
+      ${d.url
+        ? `<img class="cook-preview" src="${esc(d.url)}" alt="Your photo">
+           <div class="cook-photo-links">
+             <button type="button" class="link-btn" data-action="cook-photo">Change photo</button>
+             <button type="button" class="link-btn quiet-link" data-action="cook-photo-out">Take out photo</button>
+           </div>`
+        : `<button type="button" class="btn block add-photo-btn" data-action="cook-photo">${iconSvg('camera')}Add a photo</button>`}
+      <input id="cook-file" type="file" accept="image/*" hidden>
+    </div>
+    <label class="field" for="cook-say">How did it turn out?</label>
+    <textarea id="cook-say" class="say" maxlength="1000" rows="3" placeholder="You can leave this empty">${esc(d.text)}</textarea>
+    <button type="button" class="btn primary block cook-post" data-action="cook-post"${d.posting ? ' disabled' : ''}>${d.posting ? 'Posting…' : 'Post'}</button>
+    <div id="cook-who">${cookWhoHtml()}</div>`;
+}
+
+/**
+ * "Posting as Mom". On Mom's or Sharon's account, "Not Mom?" opens the You
+ * page's switch: someone else using that account on their own phone makes the
+ * phone their own in one tap.
+ */
+function cookWhoHtml() {
+  const member = !isGuest();
+  return `<p class="muted who-sees">Posting as <b>${esc(myDisplayName())}</b>${member ? ` · <button type="button" class="inline-link" data-action="not-me">Not ${esc(myDisplayName())}?</button>` : ''}.
+    Everyone who uses the app can see it.${member ? ' It also marks the dish as made today.' : ''}</p>`;
+}
+
+async function pickCookPhoto(file) {
+  const d = state.cookDraft;
+  if (!d || !file) return;
+  let blob;
+  try { blob = await shrinkPhoto(file); } catch (e) { return toast('Couldn’t read that photo. Try another one.'); }
+  if (d.url) URL.revokeObjectURL(d.url);
+  d.blob = blob;
+  d.url = URL.createObjectURL(blob);
+  if (location.hash === `#cook/${d.row}`) renderCook(d.row);
+}
+
+function dropCookPhoto() {
+  const d = state.cookDraft;
+  if (!d) return;
+  if (d.url) URL.revokeObjectURL(d.url);
+  d.blob = null;
+  d.url = '';
+  renderCook(d.row);
+}
+
+async function postCooked() {
+  const d = state.cookDraft;
+  const r = d && findRecipe(d.row);
+  if (!d || d.posting || !cookable(r)) return;
+  d.text = ($('#cook-say') || {}).value ?? d.text;
+  d.posting = true;
+  renderCook(d.row);
+  const bucket = db().storage.from(PHOTO_BUCKET);
+  let path = '';
+  try {
+    const session = await requireSession();
+    const uid = session.user.id;
+    setUid(uid);
+    if (d.blob) {
+      path = `cooked/${uid}/${Date.now()}.jpg`;
+      const up = await bucket.upload(path, d.blob, { contentType: 'image/jpeg', cacheControl: '31536000', upsert: false });
+      if (up.error) throw up.error;
+    }
+    let saved;
+    try {
+      saved = fromCookedDb(await query(db().from('cooked')
+        .insert({ recipe_id: r.row, comment: d.text.trim().slice(0, 1000), photo_path: path || null })
+        .select(COOKED_COLUMNS).single()));
+    } catch (e) {
+      if (path) bucket.remove([path]).catch(() => {}); // don't leave a photo nothing points to
+      throw e;
+    }
+    // Show it from the phone's own copy; no need to download what was just taken.
+    if (path) photoUrls.set(path, { url: URL.createObjectURL(d.blob), until: Infinity });
+    state.cooked = [saved, ...state.cooked.filter(p => p.id !== saved.id)];
+    store.set('cooked', state.cooked);
+    if (d.url) URL.revokeObjectURL(d.url);
+    state.cookDraft = null;
+    // Mom and Sharon: it's made today, as "I made this today" used to say.
+    if (!isGuest()) {
+      const now = new Date().toISOString();
+      updateRecipe(r, { last_cooked_at: now }).catch(() => {});
+      replaceRecipe({ ...r, last_cooked_at: now });
+    }
+    toast(shownPost(saved) ? 'Posted' : 'Marked as made today');
+    if (location.hash === `#cook/${r.row}`) goBack();
+  } catch (e) {
+    d.posting = false;
+    if (location.hash === `#cook/${d.row}`) renderCook(d.row);
+    toast(cookedMessage(e));
+  }
+}
+
+function cookedMessage(e) {
+  if (e && (e.code === '42P01' || e.code === 'PGRST205' || /cooked/i.test(e.message || '') && /does not exist|schema cache/i.test(e.message || ''))) {
+    return 'Posting isn’t switched on yet. Ask Sharon.';
+  }
+  return offlineMessage(e);
+}
+
+// ---- the Cooked tab (#cooked) ----
+
+function renderCookedTab() {
+  const mine = state.cookedWho === 'mine';
+  const posts = mine ? state.cooked.filter(myPost) : state.cooked.filter(p => p.photo);
+  view().innerHTML = `
+    <div class="tab-head"><h1>Cooked</h1>${meButtonHtml()}</div>
+    <p class="muted">${mine ? 'Everything you said you cooked' : 'What everyone made from these recipes'}</p>
+    <div class="segmented cooked-who" role="group" aria-label="Whose">
+      <button type="button" data-cooked-who="all" aria-pressed="${!mine}">Everyone</button>
+      <button type="button" data-cooked-who="mine" aria-pressed="${mine}">Mine</button>
+    </div>
+    ${posts.length ? `<div class="wall">${posts.map(wallItemHtml).join('')}</div>`
+      : `<p class="muted cooked-none">${mine
+        ? 'Nothing yet. When you cook a dish from the app, open it and tap <b>I cooked this</b>. It’ll show here.'
+        : 'No photos yet. When you cook something from the app, open it, tap <b>I cooked this</b> and add a photo.'}</p>`}`;
+  loadPhotos();
+}
+
+function wallItemHtml(p) {
+  const r = findRecipe(p.row);
+  const dish = r ? displayName(r) : 'A recipe';
+  const by = state.cookedWho === 'mine' ? agoText(p.at) : `${posterName(p)} · ${agoText(p.at)}`;
+  // Mine also lists dishes posted without a photo: their tile, and a tap opens the recipe.
+  const pic = p.photo ? `<span class="wall-pic">${photoImg(p.photo, '')}</span>`
+    : `<span class="wall-pic wall-tile tint-${r ? tileTint(r) : 'gray'}">${iconSvg(r ? iconFor(r) : 'bowl')}</span>`;
+  const href = p.photo ? `#photo/${p.id}` : r ? `#recipe/${r.row}` : '#cooked';
+  return `<a class="wall-item" href="${href}">${pic}<span class="dish">${esc(dish)}</span><span class="by">${esc(by)}</span></a>`;
+}
+
+// ---- one photo, large (#photo/<id>) ----
+
+function renderPhoto(id) {
+  const p = findPost(id);
+  if (!p || !p.photo) {
+    view().innerHTML = `${backHtml()}<h1>Not found</h1><p class="muted">That photo isn’t here any more.</p>`;
+    return;
+  }
+  const r = findRecipe(p.row);
+  view().innerHTML = `
+    <div class="viewer" role="dialog" aria-label="Photo">
+      <div class="viewer-top"><button type="button" class="viewer-close" data-action="back" aria-label="Close">${iconSvg('x')}</button></div>
+      <div class="viewer-photo">${photoImg(p.photo, '')}</div>
+      <h2>${esc(r ? displayName(r) : 'A recipe')}</h2>
+      <p class="by">${esc(posterName(p))} · ${esc(agoText(p.at))}</p>
+      ${p.comment ? `<p class="say">${esc(p.comment)}</p>` : ''}
+      ${likeHtml(p)}
+      ${r ? `<button type="button" class="btn primary block" data-action="go-recipe" data-row="${r.row}">Go to recipe</button>` : ''}
+      ${canDeletePost(p) ? `<button type="button" class="link-btn block viewer-delete" data-action="delete-post" data-post="${p.id}">Delete</button>` : ''}
+    </div>`;
+  loadPhotos();
+}
+
+/**
+ * "Go to recipe": back to it when that's where she came from, otherwise it
+ * opens in place of the photo, so Back from the recipe goes to the wall.
+ */
+function goToRecipe(row) {
+  const behind = nav.idx > 0 ? nav.hashes[nav.idx - 1] : '';
+  if (behind === `#recipe/${row}`) return history.back();
+  navReplace(`#recipe/${row}`);
+}
+
+// ---- deleting a post ----
+// Like removing a guest: it goes from the screen at once, with Undo in the
+// message; the database (and the photo) only hear about it once the message
+// has gone, or the app is put away. Not when the screen changes: deleting
+// from a photo opened large goes back to the wall, and Undo must still work.
+let pendingPostDelete = null; // { post, timer }
+
+function deletePostSoon(id) {
+  const post = findPost(id);
+  if (!post || !canDeletePost(post)) return;
+  flushPostDelete();
+  state.cooked = state.cooked.filter(p => p !== post);
+  const timer = setTimeout(flushPostDelete, 6000);
+  pendingPostDelete = { post, timer };
+  if (location.hash === `#photo/${post.id}`) goBack();
+  else redrawCooked();
+  toast('Deleted', {
+    label: 'Undo',
+    run: () => {
+      if (!pendingPostDelete || pendingPostDelete.post !== post) return;
+      clearTimeout(timer);
+      pendingPostDelete = null;
+      putBackPost(post);
+    },
+  });
+}
+
+function putBackPost(post) {
+  if (state.cooked.some(p => p.id === post.id)) return;
+  state.cooked = [...state.cooked, post].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  redrawCooked();
+}
+
+function redrawCooked() {
+  const hash = location.hash || '#today';
+  if (hash === '#cooked') renderCookedTab();
+  else if (hash.startsWith('#recipe/')) refreshCookedSection();
+}
+
+async function flushPostDelete() {
+  const p = pendingPostDelete;
+  if (!p) return;
+  pendingPostDelete = null;
+  clearTimeout(p.timer);
+  try {
+    await requireSession();
+    await query(db().from('cooked').delete().eq('id', p.post.id));
+    store.set('cooked', state.cooked);
+    if (p.post.photo) db().storage.from(PHOTO_BUCKET).remove([p.post.photo]).catch(() => {});
+  } catch (e) {
+    putBackPost(p.post);
+    toast(offlineMessage(e));
+  }
+}
+
 // ---------- signing in ----------
 
 async function signIn(email, password) {
@@ -869,6 +1325,13 @@ async function signIn(email, password) {
     throw new Error('not-allowed');
   }
   setMember(data.user.email);
+  setUid(data.user.id);
+}
+
+function setUid(id) {
+  if (state.uid === id) return;
+  state.uid = id || null;
+  store.set('uid', state.uid);
 }
 
 function setMember(email) {
@@ -893,7 +1356,7 @@ async function refreshAdmin() {
     state.admin = admin;
     store.set('admin', admin);
     state.visitors = null; // what the page may show has changed
-    if (location.hash === '#today' || location.hash === '' || location.hash === '#visitors') render();
+    if (location.hash === '#today' || location.hash === '' || location.hash === '#me') render();
   } catch (e) { /* keep what this phone knew */ }
 }
 
@@ -948,6 +1411,7 @@ async function joinFamily(code, name) {
       throw new Error('wrong-code');
     }
     setGuest(data.user.id, name);
+    setUid(data.user.id);
     touched = true; // joining counts as this open's visit
   } finally {
     joining = false;
@@ -960,6 +1424,7 @@ function joinMessage(e) {
   if ((/anonymous/i.test(text) && /disabled|not enabled/i.test(text)) || /signups? not allowed|signup_disabled/i.test(text)) {
     return 'Guest mode isn’t switched on yet. Ask Sharon.';
   }
+  if (/from this phone/i.test(text)) return 'Too many wrong codes from this phone. Try again in an hour.';
   if (e.status === 429 || /rate limit|too many/i.test(text)) return 'Too many people tried just now. Wait a few minutes and try again.';
   if (isNetworkError(e)) return 'Couldn’t reach the server. Check the internet and try again.';
   return e.message || 'Couldn’t let you in. Try again.';
@@ -983,7 +1448,7 @@ async function guestEnded() {
 
 /** "Leave guest mode": their plan, list and recipes go, then they're signed out. */
 async function leaveGuest() {
-  if (!confirm('Leave guest mode? Your meal plan and any recipes you added on this phone will be gone.')) return;
+  if (!confirm('Leave guest mode? Your meal plan and any recipes you added on this phone will be gone. What you posted on Cooked stays.')) return;
   const id = guestId();
   try {
     await requireSession();
@@ -993,6 +1458,7 @@ async function leaveGuest() {
       query(db().from('shopping_items').delete().eq('guest_id', id)),
     ]);
     await query(db().from('recipes').delete().eq('owner', id));
+    await query(db().rpc('leave_guest')).catch(() => {}); // off the guest list (014)
   } catch (e) { /* offline: nobody else can see them anyway */ }
   await signOut();
   toast('You’ve left guest mode');
@@ -1031,13 +1497,31 @@ function signedOut() {
   state.plan = [];
   state.lastPlanned = null;
   state.choose = null;
+  state.uid = null;
+  state.myName = '';
+  state.switching = false;
+  state.renaming = false;
+  state.likes = [];
+  store.remove('myName');
+  store.remove('likes');
+  state.cooked = [];
+  state.cookedWho = 'all';
+  state.cookDraft = null;
+  pendingPostDelete = null;
   photoUrls.clear();
+  store.remove('uid');
+  store.remove('cooked');
   store.remove('user');
   store.remove('guest');
   store.remove('recipes');
   store.remove('shopping');
   store.remove('plan');
   store.remove('cooking');
+  store.remove('recentSuggestions');
+  store.remove('extraCategories');
+  state.extraCategories = [];
+  state.draft = null;
+  state.removing = null;
   if (was) render();
 }
 
@@ -1200,6 +1684,12 @@ function backHtml(action = 'back') {
     <svg class="back-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7"/></svg>Back</button>`;
 }
 
+/** A recipe's link for an href: only web addresses, never javascript: or the like. */
+function webLink(url) {
+  const u = String(url || '').trim();
+  return /^https?:\/\//i.test(u) ? u : '#';
+}
+
 function displayName(r) {
   return String(r.name).trim() || 'Untitled recipe';
 }
@@ -1220,11 +1710,11 @@ function openLabel(r) {
  */
 function pictureHtml(r) {
   if (r.photo_path) {
-    return `<a class="picture photo" href="${esc(r.link)}" target="_blank" rel="noopener">${photoImg(r.photo_path, '')}</a>`;
+    return `<a class="picture photo" href="${esc(webLink(r.link))}" target="_blank" rel="noopener">${photoImg(r.photo_path, '')}</a>`;
   }
   const src = thumbUrl(r);
   return src
-    ? `<a class="picture" href="${esc(r.link)}" target="_blank" rel="noopener"><img src="${esc(src)}" data-thumb alt=""></a>`
+    ? `<a class="picture" href="${esc(webLink(r.link))}" target="_blank" rel="noopener"><img src="${esc(src)}" data-thumb alt=""></a>`
     : '';
 }
 
@@ -1430,7 +1920,7 @@ function suggestionHtml() {
     <p class="hero-about">${esc(about)}</p>
     ${r.notes ? `<p class="hero-note">Your note: ${esc(r.notes)}</p>` : ''}
     <div class="hero-actions">
-      <a class="btn primary" href="${esc(r.link)}" target="_blank" rel="noopener">Open recipe</a>
+      <a class="btn primary" href="${esc(webLink(r.link))}" target="_blank" rel="noopener">Open recipe</a>
       ${suggestionPool().length > 1 ? '<button type="button" data-action="another">Show another</button>' : ''}
     </div>`;
 }
@@ -1456,6 +1946,7 @@ function renderToday() {
   view().innerHTML = `
     <h1 class="sr-only">${esc(EFFORTS[effort])} ${esc(meal.toLowerCase())}</h1>
     <header class="meal-head">
+      ${meButtonHtml()}
       <p class="meal-kicker" aria-hidden="true">${esc(date)}</p>
       <label class="meal-pick">
         <span class="meal-name" aria-hidden="true">${esc(meal)}</span>
@@ -1481,8 +1972,6 @@ function renderToday() {
       <h2 class="section side-heading">On the side</h2>
       <div class="side-row">${sides.map(r => squareHtml({ r, match: null }, { status: false })).join('')}</div>
     ` : ''}
-
-    ${signOutHtml()}
   `;
 }
 
@@ -1493,23 +1982,6 @@ function todayPlanHtml() {
   const names = groups.map(({ r, copies }) =>
     `<a href="#recipe/${r.row}">${esc(displayName(r))}</a>${copies.length > 1 ? `<span class="times">${esc(timesText(copies.length))}</span>` : ''}`);
   return `<p class="plan-line">On your plan: ${names.join(', ')}</p>`;
-}
-
-/**
- * A quiet "Sign out" at the bottom of Today, out of the way of the meal, with
- * "Visitors" next to it for Sharon ("Family code" for Mom: the code, not who came in).
- * A guest gets "Leave guest mode".
- */
-function signOutHtml() {
-  if (isGuest()) {
-    return `<div class="footer-action">
-      <button class="link-btn sign-out" data-action="leave-guest">Leave guest mode</button>
-    </div>`;
-  }
-  return `<div class="footer-action footer-links">
-    <button class="link-btn sign-out" data-action="visitors">${state.admin ? 'Visitors' : 'Family code'}</button>
-    <button class="link-btn sign-out" data-action="sign-out">Sign out${state.user ? ` (${esc(state.user)})` : ''}</button>
-  </div>`;
 }
 
 // ---------- views: Recipes ----------
@@ -2180,13 +2652,14 @@ function renderRecipe(row) {
       <p class="muted">${esc(category || 'No category')} · ${esc(momSays(r))}</p>
       ${collectionsLine(r)}
 
-      <a class="btn primary block" href="${esc(r.link)}" target="_blank" rel="noopener">${esc(openLabel(r))}</a>
+      <a class="btn primary block" href="${esc(webLink(r.link))}" target="_blank" rel="noopener">${esc(openLabel(r))}</a>
       <div id="r-plan">${recipePlanHtml(r)}</div>
 
       <h2 class="section">Ingredients</h2>
       ${r.ingredients.length
         ? `<ul class="ingredients">${r.ingredients.map((x, i) => `<li>${ingredientButton(r, x, i)}</li>`).join('')}</ul>`
         : '<p class="muted">No ingredients yet.</p>'}
+      <div id="r-cooked">${cookedSectionHtml(r)}</div>
     `;
     delete view().dataset.category;
     loadPhotos();
@@ -2206,7 +2679,7 @@ function renderRecipe(row) {
       <p class="muted meals-line">${meals.length ? `Shows in: ${esc(meals.join(', '))}` : 'Not in any meal yet'}</p>
       <div id="r-made">${recipeMadeHtml(r)}</div>
 
-      <a class="btn primary block" href="${esc(r.link)}" target="_blank" rel="noopener">${esc(openLabel(r))}</a>
+      <a class="btn primary block" href="${esc(webLink(r.link))}" target="_blank" rel="noopener">${esc(openLabel(r))}</a>
       <div id="r-plan">${recipePlanHtml(r)}</div>
 
       <h2 class="section">Ingredients</h2>
@@ -2214,6 +2687,7 @@ function renderRecipe(row) {
         ? `<ul class="ingredients">${r.ingredients.map((x, i) => `<li>${ingredientButton(r, x, i)}</li>`).join('')}</ul>`
         : '<p class="muted">No ingredients yet.</p>'}
       ${String(r.notes).trim() ? `<h2 class="section">Notes</h2><p class="recipe-notes">${esc(r.notes)}</p>` : ''}
+      <div id="r-cooked">${cookedSectionHtml(r)}</div>
       ${isRemoved(r) ? `<div class="footer-action">${status === STATUS.removed
         ? '<button class="link-btn" data-action="restore">Put back in my recipes</button>'
         : '<p class="muted small">Hidden because the name says “ignore”. Change the name to show it again.</p>'}</div>` : ''}
@@ -2287,8 +2761,8 @@ function flipToggle(el) {
 }
 
 /**
- * "Last made 5 days ago", then the two small actions: made it today, and her
- * photo. Guests don't add photos, so on their own recipes it's just the first.
+ * "Last made 5 days ago"; while editing, her photo button instead. Guests don't
+ * add photos, so on their own recipes it's just the first.
  */
 function recipeMadeHtml(r) {
   if (!canEdit(r)) return '';
@@ -2298,11 +2772,9 @@ function recipeMadeHtml(r) {
       <button class="link-btn" data-action="photo">${r.photo_path ? 'Change photo' : 'Add my photo'}</button>
       <input id="r-photo" type="file" accept="image/*" hidden></div>`;
   }
+  // "I cooked this" further down marks it as made (it replaced "I made this today").
   const made = madeText(r);
-  return `${made ? `<p class="muted made">${esc(made)}</p>` : ''}
-    <div class="quick-actions">
-      ${daysSinceMade(r) === 0 ? '' : '<button class="link-btn" data-action="made-today">I made this today</button>'}
-    </div>`;
+  return made ? `<p class="muted made">${esc(made)}</p>` : '';
 }
 
 /** Mom's rating, the way a guest reads it on her recipe. */
@@ -2417,21 +2889,6 @@ async function toggleIngredient(r, i) {
   refreshIngredients(r);
   if (await done) toast(item ? `Took ${x} off your list` : `Added ${x} to your list`);
   refreshIngredients(r);
-}
-
-async function madeToday(r) {
-  const before = r;
-  const now = new Date().toISOString();
-  replaceRecipe({ ...r, last_cooked_at: now });
-  refreshRecipeTop(findRecipe(r.row));
-  try {
-    await updateRecipe(before, { last_cooked_at: now });
-    toast('Marked as made today');
-  } catch (e) {
-    replaceRecipe(before);
-    refreshRecipeTop(before);
-    toast(offlineMessage(e));
-  }
 }
 
 /** The fields on the recipe screen that differ from what's saved. */
@@ -3053,42 +3510,222 @@ async function loadVisitors() {
     await requireSession();
     // Mom gets the family code only; who came in is for Sharon (admin) alone.
     const none = Promise.resolve([]);
-    const [guests, code, planned, added] = await Promise.all([
+    // Guests' own plans and recipes are theirs: Sharon gets only how many (guest_counts, 014).
+    const [guests, code, totals] = await Promise.all([
       state.admin ? query(db().from('guests').select('user_id, name, first_seen, last_seen').order('last_seen', { ascending: false })) : none,
       query(db().rpc('get_family_code')),
-      state.admin ? query(db().from('meal_plan').select('guest_id').not('guest_id', 'is', null)) : none,
-      state.admin ? query(db().from('recipes').select('owner').not('owner', 'is', null)) : none,
+      state.admin ? query(db().rpc('guest_counts')).catch(() => []) : none,
     ]);
     const counts = {};
-    const count = (id, k) => { counts[id] = counts[id] || { planned: 0, added: 0 }; counts[id][k] += 1; };
-    planned.forEach(p => count(p.guest_id, 'planned'));
-    added.forEach(r => count(r.owner, 'added'));
-    const removing = pendingRemoval && pendingRemoval.guest.user_id;
-    state.visitors = { ...(state.visitors || {}), guests: guests.filter(g => g.user_id !== removing), counts, code, error: '' };
+    (totals || []).forEach(t => { counts[t.user_id] = { planned: Number(t.planned) || 0, added: Number(t.added) || 0 }; });
+    state.visitors = { ...(state.visitors || {}), guests, counts, code, error: '' };
   } catch (e) {
     state.visitors = { ...(state.visitors || { guests: [], counts: {} }), error: offlineMessage(e) };
   } finally {
     visitorsLoading = false;
   }
-  if (location.hash !== '#visitors') return;
+  if (location.hash !== '#me') return;
   if ($('#v-link')) refreshVisitors(); // already up: leave the Change code box alone
-  else renderVisitors();
+  else renderMe();
 }
 
-function renderVisitors() {
-  if (!state.visitors) loadVisitors();
+// ---------- the You page (#me) ----------
+// One place for who's signed in and the grown-up things, instead of links at
+// the bottom of Today: your name at the top (a guest can fix theirs), "What
+// I've cooked", then for Sharon the people who came in, for Mom and Sharon the
+// family code, and Sign out (or Leave guest mode) at the bottom. #visitors,
+// the old address, opens it too.
+
+function renderMe() {
+  const guest = isGuest();
+  if (!guest && !state.visitors) loadVisitors();
+  const name = myDisplayName();
+  const posts = state.cooked.filter(myPost).length;
+  const people = state.visitors && state.visitors.guests ? state.visitors.guests.length : 0;
   view().innerHTML = `
     ${backHtml()}
-    ${state.admin ? `<h1>Visitors</h1>
-    <p class="muted">Family who came in with the family code. They see Mom’s recipes and plan for themselves; they can’t change hers.</p>
-    <div id="v-list">${visitorsListHtml()}</div>
-    <h2 class="section">Family code</h2>` : `<h1>Family code</h1>
-    <p class="muted">Family open the app, tap Continue as guest and type this code. They see your recipes and plan for themselves; they can’t change yours.</p>`}
-    <div id="v-link">${familyCodeHtml()}</div>
-    <p class="muted small signin-note">To sign in on a new phone: ${esc(appAddress().replace(/^https?:\/\//, ''))}/#signin</p>
+    <header class="me-head">
+      <span class="me-avatar" aria-hidden="true">${esc(name === 'You' ? '?' : [...name][0].toUpperCase())}</span>
+      <div class="me-who">
+        <p class="meal-kicker">Signed in as</p>
+        <h1 class="me-name">${esc(name)}</h1>
+        <p class="muted small me-sub">${guest ? 'Guest, with the family code' : esc(state.user || '')}</p>
+      </div>
+    </header>
+    ${guest ? `<div id="me-rename">${renameHtml()}</div>` : `<div id="me-switch">${switchHtml()}</div>`}
+
+    <button type="button" class="btn block me-cooked" data-action="my-cooked">${iconSvg('camera')}What I’ve cooked${posts ? ` <span class="count">${posts}</span>` : ''}</button>
+
+    ${state.admin && !guest ? `
+      <section class="me-section">
+        <h2 class="section">People${people ? ` <span class="count">${people}</span>` : ''}</h2>
+        <p class="muted small">Family who came in with the family code. Only you see this.</p>
+        <div id="v-list">${visitorsListHtml()}</div>
+      </section>` : ''}
+
+    ${guest ? '' : `
+      <section class="me-section">
+        <h2 class="section">Family code</h2>
+        <p class="muted small">Family open the app, tap Continue as guest and type this.</p>
+        <div id="v-link">${familyCodeHtml()}</div>
+      </section>`}
+
+    <div class="me-out">
+      <button type="button" class="btn block" data-action="${guest ? 'leave-guest' : 'sign-out'}">${guest ? 'Leave guest mode' : 'Sign out'}</button>
+      ${state.admin && !guest ? `<p class="muted small signin-note">To sign in on a new phone: ${esc(appAddress().replace(/^https?:\/\//, ''))}/#signin</p>` : ''}
+    </div>
   `;
 }
 
+/** A guest's "Change my name": a quiet link, or the box to type a new one. */
+function renameHtml() {
+  if (!state.renaming) return '<button type="button" class="link-btn quiet-link me-rename" data-action="rename-open">Change my name</button>';
+  const now = myDisplayName() === 'You' ? '' : myDisplayName();
+  return `<form id="rename-form" class="code-form" novalidate>
+    <label class="field" for="me-new-name">Your name</label>
+    <input id="me-new-name" type="text" maxlength="40" autocomplete="name" value="${esc(now)}" enterkeyhint="done">
+    <p class="muted small hint">Your posts and likes change to the new name.</p>
+    <div class="row link-actions">
+      <button type="button" data-action="rename-cancel">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>`;
+}
+
+/**
+ * "Not Mom?" on Mom's (or Sharon's) account: someone else in the family who
+ * uses that account on their own phone makes the phone their own. One tap:
+ * the phone leaves the account and comes back in as a guest under their name
+ * (the app knows the family code), and their posts come with them.
+ */
+function switchHtml() {
+  const account = myDisplayName();
+  if (!state.switching) {
+    return `<button type="button" class="link-btn quiet-link me-rename" data-action="switch-open">Not ${esc(account)}? Make this phone your own</button>`;
+  }
+  return `<form id="switch-form" class="code-form switch-form" novalidate>
+    <label class="field" for="switch-name">Who’s using this phone?</label>
+    <input id="switch-name" type="text" maxlength="40" autocomplete="name" enterkeyhint="done" placeholder="Your name">
+    <p class="muted small hint">This phone stops using ${esc(account)}’s account and comes back in as you, as a guest: your own plan, your own posts, and ${esc(account)}’s recipes to cook from. Posts already made from here under your name come with you. ${esc(account)}’s own phone isn’t touched.</p>
+    <div class="row link-actions">
+      <button type="button" data-action="switch-cancel">Cancel</button>
+      <button type="submit" class="primary">Switch to me</button>
+    </div>
+  </form>`;
+}
+
+/** The one-tap switch from Mom's account to the phone's own guest. */
+async function switchToOwn(form) {
+  const input = $('#switch-name');
+  const btn = form.querySelector('button[type=submit]');
+  const name = input.value.replace(/\s+/g, ' ').trim().slice(0, 40);
+  if (!name) { input.focus(); return toast('Type your name first'); }
+  if (name.toLowerCase() === myDisplayName().toLowerCase()) { input.focus(); return toast(`Type your own name, not ${myDisplayName()}’s`); }
+  btn.disabled = true;
+  btn.textContent = 'Switching…';
+  let code = '', token = null;
+  try {
+    await requireSession();
+    code = await query(db().rpc('get_family_code'));
+    if (!code) throw new Error('There’s no family code yet. Sharon can make one on her You page.');
+    // Before migration 013 there's no handover: the switch still works, the posts just stay.
+    try { token = await query(db().rpc('start_handover', { name })); } catch (e) {
+      if (e && e.code === '22023') throw e; // a name it won't take (the account's own, or Mom's or Sharon's)
+      token = null;
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Switch to me';
+    return toast(e && e.code === '22023' ? e.message : offlineMessage(e));
+  }
+  // The account's own sign-in is kept until the guest one has worked: if
+  // joining fails (no internet, or joining is paused), the phone goes back to
+  // the account as it was.
+  const { data: { session: before } } = await db().auth.getSession();
+  joining = true; // checkSession waits
+  try {
+    await joinFamily(code, name);
+  } catch (e) {
+    let back = false;
+    try {
+      if (before) back = !(await db().auth.setSession({ access_token: before.access_token, refresh_token: before.refresh_token })).error;
+    } catch (err) { back = false; }
+    joining = false;
+    if (back) {
+      setMember(before.user.email);
+      setUid(before.user.id);
+      state.switching = true;
+      history.replaceState({ idx: nav.idx }, '', location.pathname + '#me');
+      nav.hashes[nav.idx] = '#me';
+      loadRecipes({ quiet: true });
+      loadCooked();
+      loadMyName();
+      render();
+      return toast(`Couldn’t switch: ${e.message === 'wrong-code' ? 'the family code has changed' : joinMessage(e)}`);
+    }
+    // Rare: neither worked. The welcome is up with both boxes filled in; one tap tries again.
+    renderWelcome({ name, error: e.message === 'wrong-code' ? WRONG_CODE : joinMessage(e) });
+    const box = $('#j-code');
+    if (box) box.value = code;
+    return;
+  }
+  joining = false;
+  // Now a guest: clear the account's data off this phone, and end its old
+  // sign-in on the server (best effort).
+  const me = state.guest;
+  signedOut();
+  setGuest(me.id, me.name);
+  setUid(me.id);
+  if (before) {
+    fetch(`${SUPABASE_URL}/auth/v1/logout?scope=local`, {
+      method: 'POST', headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${before.access_token}` },
+    }).catch(() => {});
+  }
+  let moved = 0;
+  if (token) { try { moved = Number(await query(db().rpc('finish_handover', { token }))) || 0; } catch (e) { moved = 0; } }
+  history.replaceState({ idx: nav.idx }, '', location.pathname + '#today');
+  nav.hashes[nav.idx] = '#today';
+  await loadRecipes();
+  loadShopping();
+  loadPlan();
+  loadCooked();
+  loadMyName();
+  render();
+  toast(moved ? `This phone is now ${name}’s. Your ${moved} post${moved === 1 ? '' : 's'} came with you.` : `This phone is now ${name}’s`);
+}
+
+async function saveMyName(form) {
+  const input = $('#me-new-name');
+  const btn = form.querySelector('button[type=submit]');
+  const name = input.value.replace(/\s+/g, ' ').trim().slice(0, 40);
+  if (!name) { input.focus(); return toast('Type your name first'); }
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    await requireSession();
+    const saved = await query(db().rpc('rename_me', { name }));
+    if (!saved) throw new Error('Only guests can change their name here.');
+    state.myName = saved;
+    store.set('myName', saved);
+    state.guest = { ...state.guest, name: saved };
+    store.set('guest', state.guest);
+    const me = state.uid || guestId();
+    state.cooked = state.cooked.map(p => (p.user === me && !p.member ? { ...p, name: saved } : p));
+    state.likes = state.likes.map(l => (l.user === me ? { ...l, name: saved } : l));
+    store.set('cooked', state.cooked);
+    store.set('likes', state.likes);
+    state.renaming = false;
+    input.blur();
+    renderMe();
+    toast('Name saved');
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Save';
+    toast(e && e.code === '22023' ? e.message : e && e.code === 'PGRST202' ? 'Changing names isn’t switched on yet. Ask Sharon.' : offlineMessage(e));
+  }
+}
+
+/** Sharon's list of who came in: one line each, the initial, when, and what they did. */
 function visitorsListHtml() {
   const v = state.visitors;
   if (!v) return '<p class="muted">Loading…</p>';
@@ -3096,51 +3733,63 @@ function visitorsListHtml() {
   if (!v.guests.length) return '<p class="muted empty">Nobody yet. Send them the family code below.</p>';
   return `<ul class="visitors">${v.guests.map(g => {
     const c = v.counts[g.user_id] || { planned: 0, added: 0 };
+    const posts = state.cooked.filter(p => p.user === g.user_id).length;
     const did = [
-      c.planned ? `${c.planned} dish${c.planned === 1 ? '' : 'es'} planned` : '',
+      posts ? `${posts} post${posts === 1 ? '' : 's'}` : '',
+      c.planned ? `${c.planned} planned` : '',
       c.added ? `${c.added} recipe${c.added === 1 ? '' : 's'} added` : '',
     ].filter(Boolean).join(' · ');
-    return `<li class="visitor">
-      <div class="visitor-text">
-        <span class="visitor-name">${esc(g.name)}</span>
-        <span class="visitor-sub">Last visit ${esc(timeAgo(g.last_seen))} · First visit ${esc(timeAgo(g.first_seen))}</span>
-        ${did ? `<span class="visitor-sub">${esc(did)}</span>` : ''}
+    const asking = state.removing === g.user_id;
+    return `<li class="visitor${asking ? ' asking' : ''}">
+      <div class="visitor-row">
+        <span class="visitor-initial" aria-hidden="true">${esc([...String(g.name || '?')][0].toUpperCase())}</span>
+        <div class="visitor-text">
+          <span class="visitor-name">${esc(g.name)}</span>
+          <span class="visitor-sub">Here ${esc(timeAgo(g.last_seen))}${did ? ` · ${esc(did)}` : ''}</span>
+        </div>
+        ${asking ? '' : `<button type="button" class="link-btn danger-link visitor-remove" data-remove-guest="${esc(g.user_id)}" aria-label="Remove ${esc(g.name)}">Remove</button>`}
       </div>
-      <button type="button" class="link-btn danger-link visitor-remove" data-remove-guest="${esc(g.user_id)}" aria-label="Remove ${esc(g.name)}">Remove</button>
+      ${asking ? `<div class="remove-ask">
+        <p>Remove ${esc(g.name)}? They’re signed out of the app on their phone.</p>
+        <button type="button" class="btn block danger-btn" data-remove-confirm="${esc(g.user_id)}" data-with-posts="0">Remove${posts ? ', keep their posts' : ''}</button>
+        ${posts ? `<button type="button" class="btn block danger-btn" data-remove-confirm="${esc(g.user_id)}" data-with-posts="1">Remove and delete their ${posts} post${posts === 1 ? '' : 's'}</button>` : ''}
+        <button type="button" class="link-btn block" data-action="remove-cancel">Cancel</button>
+      </div>` : ''}
     </li>`;
   }).join('')}</ul>`;
 }
 
+/** The family code, large, with Copy and Share; "Change code" opens the box (and the random one). */
 function familyCodeHtml() {
   const v = state.visitors;
-  if (!v) return '';
-  if (!v.code && !v.changing) return `<p class="muted">${v.error ? esc(v.error) : 'No family code yet.'}</p>
-    <button type="button" class="btn block" data-action="change-code">Choose a code</button>
-    <button type="button" class="link-btn new-link" data-action="new-link">Make a random one</button>`;
-  const change = v.changing
-    ? `<form id="code-form" class="code-form" novalidate>
+  if (!v) return '<p class="muted">Loading…</p>';
+  if (v.changing) {
+    return `<form id="code-form" class="code-form" novalidate>
         <label class="field" for="v-new-code">New family code</label>
         <input id="v-new-code" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="${CODE_MAX + 20}" enterkeyhint="done" aria-describedby="v-code-hint v-code-error">
-        <p class="muted small hint" id="v-code-hint">Use 6 or more letters or numbers that family will remember but strangers won’t guess.</p>
+        <p class="muted small hint" id="v-code-hint">Use 6 or more letters or numbers that family will remember but strangers won’t guess. People already in stay in; only new people need the new code.</p>
         <p class="error" id="v-code-error" role="alert"${v.codeError ? '' : ' hidden'}>${esc(v.codeError || '')}</p>
         <div class="row link-actions">
           <button type="button" data-action="cancel-code">Cancel</button>
           <button type="submit" class="primary">Save</button>
         </div>
-      </form>`
-    : '<button type="button" class="btn block change-code" data-action="change-code">Change code</button>';
-  return `${v.code ? `<p class="family-code" id="v-code" aria-label="The family code">${esc(v.code)}</p>
+        <button type="button" class="link-btn new-link" data-action="new-link">Or make a random one</button>
+      </form>`;
+  }
+  if (!v.code) {
+    return `<p class="muted">${v.error ? esc(v.error) : 'No family code yet.'}</p>
+      <button type="button" class="btn block" data-action="change-code">Choose a code</button>`;
+  }
+  return `<p class="family-code" id="v-code" aria-label="The family code">${esc(v.code)}</p>
     <div class="row link-actions">
       <button type="button" data-action="copy-link">Copy</button>
       ${navigator.share ? '<button type="button" class="primary" data-action="share-link">Share</button>' : ''}
-    </div>` : ''}
-    ${change}
-    <p class="muted small link-note">Changing the code stops new people joining with the old one. People already in stay in.</p>
-    <button type="button" class="link-btn new-link" data-action="new-link">Make a new code</button>`;
+    </div>
+    <button type="button" class="link-btn quiet-link change-link" data-action="change-code">Change code</button>`;
 }
 
 function refreshVisitors() {
-  if (location.hash !== '#visitors') return;
+  if (location.hash !== '#me') return;
   const list = $('#v-list'), link = $('#v-link');
   if (list) list.innerHTML = visitorsListHtml();
   // Leave the Change code box alone while she's typing in it.
@@ -3227,49 +3876,31 @@ async function newLink(btn) {
   }
 }
 
-// "Remove" takes the guest off the page at once, with Undo in the message;
-// the database only hears about it once the message has gone (or she leaves
-// the page), so Undo needs nothing from the server.
-let pendingRemoval = null; // { guest, index, timer }
+// "Remove" asks first, in the person's own row: remove them, or remove them
+// and delete what they posted and liked. Then it offers a new family code,
+// since the old one would let them straight back in.
 
-function removeGuestSoon(id) {
+async function removeGuestNow(id, withPosts) {
   const v = state.visitors;
-  const index = v ? v.guests.findIndex(g => g.user_id === id) : -1;
-  if (index < 0) return;
-  flushRemoval();
-  const guest = v.guests[index];
-  v.guests = v.guests.filter(g => g !== guest);
-  const timer = setTimeout(flushRemoval, 6000);
-  pendingRemoval = { guest, index, timer };
-  refreshVisitors();
-  toast(`Removed ${guest.name}`, {
-    label: 'Undo',
-    run: () => {
-      if (!pendingRemoval || pendingRemoval.guest !== guest) return;
-      clearTimeout(timer);
-      pendingRemoval = null;
-      putBackGuest(guest, index);
-    },
-  });
-}
-
-function putBackGuest(guest, index) {
-  const v = state.visitors;
-  if (!v || v.guests.some(g => g.user_id === guest.user_id)) return;
-  v.guests.splice(Math.min(index, v.guests.length), 0, guest);
-  refreshVisitors();
-}
-
-async function flushRemoval() {
-  const p = pendingRemoval;
-  if (!p) return;
-  pendingRemoval = null;
-  clearTimeout(p.timer);
+  const guest = v && v.guests.find(g => g.user_id === id);
+  if (!guest) return;
+  state.removing = null;
   try {
     await requireSession();
-    await query(db().rpc('remove_guest', { guest: p.guest.user_id }));
+    const photos = await query(db().rpc('remove_guest', { guest: id, with_posts: !!withPosts }));
+    v.guests = v.guests.filter(g => g !== guest);
+    if (withPosts) {
+      state.cooked = state.cooked.filter(p => p.user !== id);
+      state.likes = state.likes.filter(l => l.user !== id);
+      store.set('cooked', state.cooked);
+      store.set('likes', state.likes);
+      const paths = (Array.isArray(photos) ? photos : []).filter(Boolean);
+      if (paths.length) db().storage.from(PHOTO_BUCKET).remove(paths).catch(() => {});
+    }
+    refreshVisitors();
+    toast(`Removed ${guest.name}. They could come back with the code`, { label: 'Change code', run: () => openCodeForm(true) });
   } catch (e) {
-    putBackGuest(p.guest, p.index);
+    refreshVisitors();
     toast(offlineMessage(e));
   }
 }
@@ -3293,8 +3924,8 @@ function render() {
     history.replaceState({ idx: nav.idx }, '', location.pathname + '#today');
     nav.hashes[nav.idx] = hash = '#today';
   }
-  const tab = hash.startsWith('#recipe') ? 'recipes' : hash.startsWith('#plan') ? 'plan'
-    : hash === '#visitors' ? 'today' : hash.slice(1);
+  const tab = hash.startsWith('#recipe') || hash.startsWith('#cook/') ? 'recipes' : hash.startsWith('#plan') ? 'plan'
+    : hash.startsWith('#photo/') ? 'cooked' : hash === '#me' || hash === '#visitors' ? 'today' : hash.slice(1);
   document.querySelectorAll('.tabs a').forEach(a => {
     if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
@@ -3314,22 +3945,28 @@ function render() {
     if (up && up.dataset.link === joinCodeFrom(hash) && up.dataset.notice === (state.notice ? 'yes' : '')) return;
     return renderWelcome();
   }
-  document.body.classList.remove('no-tabs');
+  // A photo opened large fills the screen, bar and all.
+  document.body.classList.toggle('no-tabs', hash.startsWith('#photo/'));
 
   // Don't wipe out what she's typing when a background refresh lands.
   const active = document.activeElement;
   if (active && view().contains(active) && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) {
     if (hash === '#recipes') renderList();
     if (pickerRoute(hash)) renderPickerGrid();
+    if (hash.startsWith('#recipe/')) refreshCookedSection();
     return;
   }
 
   if (hash.startsWith('#recipe/')) return renderRecipe(hash.split('/')[1]);
+  if (hash.startsWith('#cook/')) return renderCook(hash.split('/')[1]);
+  if (hash === '#cooked') return renderCookedTab();
+  if (hash.startsWith('#photo/')) return renderPhoto(hash.split('/')[1]);
   if (hash === '#recipes') return renderRecipes();
   if (hash === '#add') return renderAdd();
   if (hash === '#list') { if (SHOPPING) return renderShopping(); location.replace('#today'); return; }
   if (hash === '#plan' || hash.startsWith('#plan/')) return renderPlanRoute(hash);
-  if (hash === '#visitors' && !isGuest()) return renderVisitors();
+  if (hash === '#visitors') { location.replace('#me'); return; } // the old address
+  if (hash === '#me') return renderMe();
   return renderToday();
 }
 
@@ -3418,6 +4055,8 @@ function backFallback() {
   const pick = pickerRoute();
   if (pick) { state.planDay = pick.day; return '#plan'; }
   if (location.hash.startsWith('#recipe/')) return state.recipeCtx && state.recipeCtx.fromWelcome ? '#today' : '#recipes';
+  if (location.hash.startsWith('#cook/')) return `#recipe/${location.hash.split('/')[1]}`;
+  if (location.hash.startsWith('#photo/')) return '#cooked';
   return '#today'; // also the Visitors page, which is reached from Today
 }
 
@@ -3448,7 +4087,6 @@ function entered(hash, from, fresh) {
 }
 
 window.addEventListener('hashchange', () => {
-  flushRemoval(); // a guest removed on the Visitors page, if she leaves before the Undo goes
   if (state.user && isGuest() && joinCodeFrom(location.hash)) state.joinPending = joinCodeFrom(location.hash);
   const from = nav.hashes[nav.idx];
   nav.scrolls[nav.idx] = window.scrollY; // the screen she's leaving
@@ -3468,13 +4106,19 @@ window.addEventListener('hashchange', () => {
   const hash = location.hash || '#today';
   nav.hashes[nav.idx] = hash;
   entered(hash, from, fresh);
-  if (hash === '#visitors' && fresh && state.visitors) state.visitors = { ...state.visitors, changing: false, codeError: '' };
+  if (hash === '#me' && fresh) {
+    state.renaming = false;
+    if (from && !from.startsWith('#cook/')) state.switching = false;
+    if (state.visitors) state.visitors = { ...state.visitors, changing: false, codeError: '' };
+  }
   render();
   window.scrollTo(0, nav.scrolls[nav.idx] || 0);
   // Someone else may have changed the list or the plan on their phone.
   if (SHOPPING && hash === '#list') loadShopping();
   if (hash.startsWith('#plan')) loadPlan();
-  if (hash === '#visitors') loadVisitors();
+  if (hash === '#me') { if (!isGuest()) loadVisitors(); loadMyName(); }
+  if (hash === '#cooked' || hash.startsWith('#recipe/')) loadCooked();
+  if (hash.startsWith('#recipe/')) loadRecipePosts(hash.split('/')[1]);
 });
 
 // ---------- events ----------
@@ -3491,6 +4135,8 @@ document.addEventListener('input', e => {
     state.draft.name = e.target.value;
   } else if (id === 'a-notes') {
     state.draft.notes = e.target.value;
+  } else if (id === 'cook-say') {
+    if (state.cookDraft) state.cookDraft.text = e.target.value;
   } else if (id === 'r-name' || id === 'r-notes' || id === 'r-ingredients') {
     showRecipeSave();
   }
@@ -3536,6 +4182,12 @@ document.addEventListener('change', e => {
       return showRecipeSave();
     case 'r-status':
       return showRecipeSave();
+    case 'cook-file': {
+      const file = el.files && el.files[0];
+      el.value = '';
+      if (file) pickCookPhoto(file);
+      return;
+    }
     case 'r-photo': {
       const r = findRecipe(location.hash.split('/')[1]);
       const file = el.files && el.files[0];
@@ -3556,6 +4208,18 @@ document.addEventListener('click', async e => {
   const hash = location.hash || '#today';
 
   if (ds.action === 'back') return goBack();
+
+  // "I cooked this", the Cooked tab and a photo opened large
+  if (ds.like) return toggleLike(ds.like);
+  if (ds.action === 'delete-post') return deletePostSoon(ds.post);
+  if (ds.action === 'go-recipe') return goToRecipe(ds.row);
+  if (ds.cookedWho && hash === '#cooked') { state.cookedWho = ds.cookedWho; return renderCookedTab(); }
+  if (hash.startsWith('#cook/')) {
+    if (ds.action === 'cook-photo') return $('#cook-file').click();
+    if (ds.action === 'cook-photo-out') return dropCookPhoto();
+    if (ds.action === 'cook-post') return postCooked();
+    if (ds.action === 'not-me') { state.switching = true; location.hash = '#me'; return; }
+  }
 
   // Today
   if (ds.effort && hash === '#today') { state.effort = ds.effort; return renderToday(); }
@@ -3600,7 +4264,6 @@ document.addEventListener('click', async e => {
     if (ds.action === 'save-recipe') return saveRecipe(el, r);
     if (ds.action === 'edit-recipe') { state.editing = String(r.row); state.mealsOpen = null; renderRecipe(r.row); window.scrollTo(0, 0); return; }
     if (ds.action === 'edit-cancel') { state.editing = null; state.mealsOpen = null; renderRecipe(r.row); window.scrollTo(0, 0); return; }
-    if (ds.action === 'made-today') return madeToday(r);
     if (ds.action === 'photo') return $('#r-photo').click();
     if (ds.action === 'remove') {
       if (!confirm(`Remove “${displayName(r)}” from your recipes? You can put it back from “Show removed”.`)) return;
@@ -3672,9 +4335,16 @@ document.addEventListener('click', async e => {
     if (ds.action === 'save-new') return saveNew(el);
   }
 
-  // Visitors
-  if (hash === '#visitors') {
-    if (ds.removeGuest) return removeGuestSoon(ds.removeGuest);
+  // The You page
+  if (hash === '#me') {
+    if (ds.action === 'my-cooked') { state.cookedWho = 'mine'; location.hash = '#cooked'; return; }
+    if (ds.action === 'rename-open') { state.renaming = true; $('#me-rename').innerHTML = renameHtml(); $('#me-new-name').focus(); return; }
+    if (ds.action === 'rename-cancel') { state.renaming = false; $('#me-rename').innerHTML = renameHtml(); return; }
+    if (ds.action === 'switch-open') { state.switching = true; $('#me-switch').innerHTML = switchHtml(); $('#switch-name').focus(); return; }
+    if (ds.action === 'switch-cancel') { state.switching = false; $('#me-switch').innerHTML = switchHtml(); return; }
+    if (ds.removeGuest) { state.removing = ds.removeGuest; return refreshVisitors(); }
+    if (ds.action === 'remove-cancel') { state.removing = null; return refreshVisitors(); }
+    if (ds.removeConfirm) return removeGuestNow(ds.removeConfirm, ds.withPosts === '1');
     if (ds.action === 'copy-link') return copyLink();
     if (ds.action === 'share-link') return shareLink();
     if (ds.action === 'new-link') return newLink(el);
@@ -3682,7 +4352,6 @@ document.addEventListener('click', async e => {
     if (ds.action === 'cancel-code') return openCodeForm(false);
   }
 
-  if (ds.action === 'visitors') { location.hash = '#visitors'; return; }
   if (ds.action === 'leave-guest') return leaveGuest();
   if (ds.action === 'sign-out') {
     if (!confirm('Sign out of the recipe app on this phone?')) return;
@@ -3735,6 +4404,14 @@ document.addEventListener('submit', async e => {
     e.preventDefault();
     return saveCode(e.target);
   }
+  if (e.target.id === 'rename-form') {
+    e.preventDefault();
+    return saveMyName(e.target);
+  }
+  if (e.target.id === 'switch-form') {
+    e.preventDefault();
+    return switchToOwn(e.target);
+  }
   if (e.target.id !== 'sign-in') return;
   e.preventDefault();
   const email = $('#s-email').value.trim();
@@ -3766,6 +4443,8 @@ document.addEventListener('submit', async e => {
   await loadRecipes();
   loadShopping();
   loadPlan();
+  loadCooked();
+  loadMyName();
   render();
   if (!sharing) showWelcome();
 });
@@ -3814,6 +4493,8 @@ async function submitJoin(form) {
   await loadRecipes();
   loadShopping();
   loadPlan();
+  loadCooked();
+  loadMyName();
   render();
   showWelcome();
 }
@@ -3918,6 +4599,7 @@ async function checkSession() {
     const { data, error } = await db().auth.getSession();
     if (data.session) {
       const u = data.session.user;
+      setUid(u.id);
       if (u.is_anonymous) {
         // A guest: once per app open, say they came (last visit on the
         // Visitors page) and learn whether they're still on the list.
@@ -3943,6 +4625,8 @@ async function checkSession() {
       loadRecipes({ quiet: state.recipes.length > 0 });
       loadShopping();
       loadPlan();
+      loadCooked();
+      loadMyName();
     } else if (!error) {
       signedOut();
     }
@@ -4033,7 +4717,7 @@ document.addEventListener('visibilitychange', () => {
 
 // A guest removed on the Visitors page just before the app is closed.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') flushRemoval();
+  if (document.visibilityState === 'hidden') flushPostDelete();
 });
 
 if ('serviceWorker' in navigator) {

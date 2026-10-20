@@ -1,8 +1,9 @@
 // A pretend Supabase for trying the app locally (node dev/server.js --fake).
 // It copies just the parts of supabase-js the app uses (sign in/out,
 // anonymous sign-in, the session, the rpc() functions, simple queries on
-// "recipes", "shopping_items", "meal_plan" and "guests", and Storage for the
-// "dish-photos" bucket) and follows the same rules as supabase/schema.sql:
+// "recipes", "shopping_items", "meal_plan", "guests" and "cooked", the
+// family_recipes() function, and Storage for the "dish-photos" bucket) and
+// follows the same rules as supabase/schema.sql:
 // signed-out or not-allowed people get no rows or photos and can't add any,
 // family recipes can't be deleted, shopping list items and planned dishes
 // can, and planned dishes can't be changed. The same dish can be planned any
@@ -12,8 +13,13 @@
 // code family-test (or open the old-style link /#join=family-test). "Change
 // code" and "Make a new code" on the Visitors page replace it, and then
 // family-test stops working. Mom and Sharon sign in at /#signin. A guest is an anonymous user with a row in
-// "guests": they read the family's recipes (owner null) and their own, and
-// only see and change shopping/plan rows with their own guest_id. An
+// "guests": they read the family's recipes (owner null) only through
+// family_recipes(), which leaves out the notes (migration 011), and their own
+// from the table, and only see and change shopping/plan rows with their own
+// guest_id. Everyone in the app sees every "I cooked this" post (cooked,
+// migration 012); the name on one comes from here, never from the phone, and
+// each person deletes their own (Sharon any). Guests may add photos only under
+// cooked/<their id>/. An
 // anonymous user who hasn't joined sees nothing. Allowed users read every
 // row, as in the real rules; the app itself asks them for owner/guest_id null.
 //
@@ -52,6 +58,12 @@
   const CODE_KEY = `${PREFIX}family-code`;
   const TAGS_FILE_KEY = `${PREFIX}tags-file`; // --mine: dev/tags.txt as last put into the saved rows
   const FAILS_KEY = `${PREFIX}join-failures`;
+  const COOKED_KEY = `${PREFIX}cooked`;
+  const LIKES_KEY = `${PREFIX}cooked-likes`;
+  const HANDOVER_KEY = `${PREFIX}handovers`;
+  const SESSIONS_KEY = `${PREFIX}sessions`; // every session this browser had, so setSession can go back
+  // allowed_users.name (migration 012): the name on Mom's and Sharon's posts.
+  const NAMES = { 'mom@example.com': 'Mom', 'me@example.com': 'Sharon' };
   const FIRST_CODE = 'family-test';
   const BUCKET = 'dish-photos';
 
@@ -178,12 +190,36 @@
       key: GUESTS_KEY, seed: () => [],
       readOnly: true,
     },
+    // "I cooked this" posts. Who and when are filled in on insert (cookedFill); no update.
+    cooked: {
+      key: COOKED_KEY, seed: () => [],
+      blank: () => ({ user_id: null, name: '', member: false, comment: '', photo_path: null }),
+      notNull: ['recipe_id'],
+      canDelete: true,
+      canUpdate: false,
+    },
+    // Likes on posts (migration 013): one per person per post; no update.
+    cooked_likes: {
+      key: LIKES_KEY, seed: () => [],
+      blank: () => ({ user_id: null, name: '' }),
+      notNull: ['post_id'],
+      unique: ['post_id', 'user_id'],
+      canDelete: true,
+      canUpdate: false,
+    },
+    // family_recipes() (migration 011): Mom's recipes without the notes. Only through rpc().
+    family_recipes: {
+      // Not what Mom removed (014).
+      rows: () => fakeDb.rows('recipes').filter(r => r.owner == null && !/^\s*not\s+interested/i.test(r.status || '') && !/\bignore\b/i.test(r.name || '')).map(({ notes, protein, created_at, updated_at, ...r }) => r),
+      readOnly: true,
+    },
   };
 
   const fakeDb = {
     offline: false,
     log: [],
     rows: (table = 'recipes') => {
+      if (TABLES[table].rows) return TABLES[table].rows();
       const saved = read(TABLES[table].key, null);
       if (!saved) return TABLES[table].seed();
       // Photos downloaded into dev/photos/ after this pretend database was saved.
@@ -198,7 +234,7 @@
     photos: () => Object.keys(read(STORAGE_KEY, {})),
     code: () => read(CODE_KEY, FIRST_CODE),
     reset() {
-      [DB_KEY, SHOP_KEY, PLAN_KEY, STORAGE_KEY, SESSION_KEY, GUESTS_KEY, CODE_KEY, FAILS_KEY, TAGS_FILE_KEY].forEach(k => localStorage.removeItem(k));
+      [DB_KEY, SHOP_KEY, PLAN_KEY, STORAGE_KEY, SESSION_KEY, GUESTS_KEY, CODE_KEY, FAILS_KEY, TAGS_FILE_KEY, COOKED_KEY, LIKES_KEY, HANDOVER_KEY, SESSIONS_KEY].forEach(k => localStorage.removeItem(k));
       return 'Reset. Reload the page.';
     },
   };
@@ -252,22 +288,68 @@
   // from `see`). `add`: whether an insert (or the row after an update) is allowed.
   const RULES = {
     recipes: {
-      see: r => allowed() || (isGuest() && (r.owner == null || r.owner === uid())),
-      add: r => allowed() || (isGuest() && r.owner === uid()),
-      change: r => allowed() || (isGuest() && r.owner === uid()),
+      // A guest reads Mom's through family_recipes() only (011); Mom's and
+      // Sharon's accounts reach only Mom's (owner null), never a guest's (014).
+      see: r => (allowed() && r.owner == null) || (isGuest() && r.owner != null && r.owner === uid()),
+      add: r => (allowed() && r.owner == null) || (isGuest() && r.owner === uid()),
+      change: r => (allowed() && r.owner == null) || (isGuest() && r.owner === uid()),
       // Allowed users have no delete rule; a guest only their own.
       del: r => isGuest() && r.owner === uid(),
     },
     shopping_items: {
-      see: r => allowed() || (isGuest() && r.guest_id === uid()),
-      add: r => allowed() || (isGuest() && r.guest_id === uid()),
+      see: r => (allowed() && r.guest_id == null) || (isGuest() && r.guest_id === uid()),
+      add: r => (allowed() && r.guest_id == null) || (isGuest() && r.guest_id === uid()),
     },
     meal_plan: {
-      see: r => allowed() || (isGuest() && r.guest_id === uid()),
-      add: r => allowed() || (isGuest() && r.guest_id === uid()),
+      see: r => (allowed() && r.guest_id == null) || (isGuest() && r.guest_id === uid()),
+      add: r => (allowed() && r.guest_id == null) || (isGuest() && r.guest_id === uid()),
     },
     guests: { see: () => admin(), add: () => false },
+    family_recipes: { see: () => allowed() || isGuest(), add: () => false },
+    cooked_likes: {
+      see: () => allowed() || isGuest(),
+      add: r => (allowed() || isGuest()) && r.user_id === uid(),
+      del: r => r.user_id === uid(),
+    },
+    cooked: {
+      see: () => allowed() || isGuest(),
+      add: r => (allowed() || isGuest()) && r.user_id === uid(),
+      del: r => (r.user_id === uid() && (allowed() || isGuest())) || admin(),
+    },
   };
+
+  /** Mom's and Sharon's names, which nobody can join or rename to (014). */
+  const memberNameTaken = name => Object.values(NAMES).some(n => n.toLowerCase() === String(name || '').trim().toLowerCase());
+
+  /** my_name() (migration 013): allowed_users.name for Mom and Sharon, the guest's own name, or ''. */
+  function myName() {
+    const s = session();
+    if (!s) return '';
+    if (allowed()) return NAMES[String(s.user.email || '').toLowerCase()] || 'Family';
+    const g = fakeDb.rows('guests').find(x => x.user_id === uid());
+    return g ? g.name : '';
+  }
+
+  /** The cooked_fill trigger: who and when come from here, and the post must be on one of Mom's recipes. */
+  function cookedFill(row) {
+    const id = uid();
+    if (!id) throw { code: '42501', message: 'Sign in first' };
+    if (!fakeDb.rows('recipes').some(r => String(r.id) === String(row.recipe_id) && r.owner == null)) {
+      throw { code: '42501', message: "Posts are only on Mom's recipes" };
+    }
+    const photo = String(row.photo_path ?? '').trim() || null;
+    if (photo && !photo.startsWith(`cooked/${id}/`)) throw { code: '42501', message: 'The photo must be in your own folder' };
+    const guest = fakeDb.rows('guests').find(g => g.user_id === id);
+    // At most 20 posts a day from a guest (014).
+    if (!allowed() && fakeDb.rows('cooked').filter(c => c.user_id === id && Date.now() - new Date(c.created_at) < 86400000).length >= 20) {
+      throw { code: '54000', message: 'That\'s a lot of posts today. Try again tomorrow.' };
+    }
+    return {
+      ...row, photo_path: photo, user_id: id, member: allowed(),
+      comment: String(row.comment ?? '').trim(),
+      name: allowed() ? myName() : guest ? guest.name : '',
+    };
+  }
   const rls = table => ({ code: '42501', message: `new row violates row-level security policy for table "${table}"` });
 
   // ---------- queries on "recipes" ----------
@@ -322,6 +404,19 @@
       let out;
       if (t.readOnly && this.op !== 'select') return { data: null, error: { code: '42501', message: `permission denied for table ${this.table}` } };
       if (this.op === 'insert') {
+        if (this.table === 'cooked') {
+          const extra = Object.keys(this.payload).filter(c => !['recipe_id', 'comment', 'photo_path'].includes(c));
+          if (extra.length) return { data: null, error: { code: '42501', message: 'permission denied for table cooked' } };
+          try { this.payload = cookedFill(this.payload); } catch (e) { return { data: null, error: e }; }
+        }
+        if (this.table === 'cooked_likes') {
+          if (Object.keys(this.payload).some(c => c !== 'post_id')) return { data: null, error: { code: '42501', message: 'permission denied for table cooked_likes' } };
+          if (!uid()) return { data: null, error: { code: '42501', message: 'Sign in first' } };
+          if (!fakeDb.rows('cooked').some(c => String(c.id) === String(this.payload.post_id))) {
+            return { data: null, error: { code: '23503', message: 'insert or update on table "cooked_likes" violates foreign key constraint' } };
+          }
+          this.payload = { post_id: this.payload.post_id, user_id: uid(), name: myName() };
+        }
         if (!rule.add({ ...t.blank(), ...this.payload })) return { data: null, error: rls(this.table) };
         const missing = t.notNull.find(c => this.payload[c] == null);
         if (missing) return { data: null, error: { code: '23502', message: `null value in column "${missing}"` } };
@@ -365,6 +460,10 @@
             fakeDb.save(fakeDb.rows('meal_plan').filter(p => !gone.has(String(p.recipe_id))), 'meal_plan');
             fakeDb.save(fakeDb.rows('shopping_items').map(x => (gone.has(String(x.recipe_id)) ? { ...x, recipe_id: null } : x)), 'shopping_items');
           }
+          if (this.table === 'cooked' && hit.length) {
+            const gone = new Set(hit.map(r => String(r.id)));
+            fakeDb.save(fakeDb.rows('cooked_likes').filter(l => !gone.has(String(l.post_id))), 'cooked_likes');
+          }
           fakeDb.save(rows.filter(r => !hit.includes(r)), this.table);
           // Like supabase-js: no rows back unless .select() was asked for.
           if (this.cols === '*') return { data: null, error: null };
@@ -402,17 +501,19 @@
 
   function bucket(name) {
     const files = () => read(STORAGE_KEY, {});
-    const check = async (what, write = true) => {
+    // A guest may also add and remove photos in their own cooked/<id>/ folder (migration 012).
+    const guestOwn = paths => isGuest() && paths.every(p => String(p).startsWith(`cooked/${uid()}/`));
+    const check = async (what, write = true, paths = []) => {
       await network(`storage ${what} ${name}`);
       if (name !== BUCKET) return { message: 'Bucket not found', statusCode: '404' };
-      if (!(allowed() || (!write && isGuest()))) return { message: 'new row violates row-level security policy', statusCode: '403' };
+      if (!(allowed() || (!write && isGuest()) || (write && paths.length && guestOwn(paths)))) return { message: 'new row violates row-level security policy', statusCode: '403' };
       return null;
     };
     const fail = e => ({ data: null, error: e.statusCode ? e : { message: e.message, statusCode: '' } });
     return {
       async upload(path, file, { upsert = false, contentType } = {}) {
         try {
-          const denied = await check(`upload ${path}`);
+          const denied = await check(`upload ${path}`, true, [path]);
           if (denied) return fail(denied);
           const all = files();
           if (all[path] && !upsert) return fail({ message: 'The resource already exists', statusCode: '409' });
@@ -423,7 +524,7 @@
       },
       async remove(paths) {
         try {
-          const denied = await check(`remove ${paths.join(' ')}`);
+          const denied = await check(`remove ${paths.join(' ')}`, true, paths);
           if (denied) return fail(denied);
           const all = files();
           const gone = paths.filter(p => all[p]);
@@ -468,6 +569,42 @@
     is_allowed: () => allowed(),
     is_admin: () => admin(),
     is_guest: () => isGuest(),
+    my_name: () => myName(),
+    // "Not Mom?" (migration 013): Mom's account asks for a handover, then the new guest claims it.
+    start_handover({ name }) {
+      if (!uid() || !allowed()) throw notAllowed('do this');
+      const clean = String(name ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim().slice(0, 40).trim();
+      if (!clean) throw { code: '22023', message: 'Type a name first.' };
+      if (clean.toLowerCase() === myName().toLowerCase() || memberNameTaken(clean)) throw { code: '22023', message: 'Type your own name, not the account\'s.' };
+      const token = crypto.randomUUID();
+      write(HANDOVER_KEY, [...read(HANDOVER_KEY, []).filter(h => Date.now() - h.at < 86400000), { token, from: uid(), name: clean, at: Date.now(), used: false }]);
+      return token;
+    },
+    finish_handover({ token }) {
+      if (!uid() || allowed() || !isGuest()) return 0;
+      const all = read(HANDOVER_KEY, []);
+      const h = all.find(x => x.token === token && !x.used && Date.now() - x.at < 15 * 60000);
+      if (!h) return 0;
+      h.used = true;
+      write(HANDOVER_KEY, all);
+      const me = uid(), guestName = myName();
+      const same = n => String(n || '').trim().toLowerCase() === h.name.toLowerCase();
+      let moved = 0;
+      fakeDb.save(fakeDb.rows('cooked').map(c => (c.user_id === h.from && !c.member && same(c.name) ? (moved++, { ...c, user_id: me, name: guestName || c.name }) : c)), 'cooked');
+      fakeDb.save(fakeDb.rows('cooked_likes').map(l => (l.user_id === h.from && same(l.name) ? { ...l, user_id: me, name: guestName || l.name } : l)), 'cooked_likes');
+      return moved;
+    },
+    // rename_me() (migration 013): a guest fixes their name; their posts and likes follow.
+    rename_me({ name }) {
+      if (!uid() || allowed() || !isGuest()) return null;
+      const clean = String(name ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim().slice(0, 40).trim();
+      if (!clean) throw { code: '22023', message: 'Type a name first.' };
+      if (memberNameTaken(clean)) throw { code: '22023', message: 'That name is taken. Add your surname or a nickname.' };
+      saveGuests(fakeDb.rows('guests').map(g => (g.user_id === uid() ? { ...g, name: clean } : g)));
+      fakeDb.save(fakeDb.rows('cooked').map(c => (c.user_id === uid() && !c.member ? { ...c, name: clean } : c)), 'cooked');
+      fakeDb.save(fakeDb.rows('cooked_likes').map(l => (l.user_id === uid() ? { ...l, name: clean } : l)), 'cooked_likes');
+      return clean;
+    },
     join_family({ code, name }) {
       const id = uid();
       if (!id || allowed()) return false;
@@ -479,6 +616,7 @@
       }
       const clean = String(name ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim().slice(0, 40).trim();
       if (!clean) return false;
+      if (memberNameTaken(clean)) throw { code: '22023', message: 'That name is taken. Add your surname or a nickname.' };
       const now = new Date().toISOString();
       const rows = fakeDb.rows('guests');
       const g = rows.find(x => x.user_id === id);
@@ -514,11 +652,31 @@
       if (!allowed()) throw notAllowed('see the family link');
       return fakeDb.code();
     },
-    remove_guest({ guest }) {
+    // 014: optionally with their posts and likes; returns the deleted posts' photo paths.
+    remove_guest({ guest, with_posts }) {
       if (!admin()) throw notAllowed('remove a guest');
-      const rows = fakeDb.rows('guests');
-      saveGuests(rows.filter(g => g.user_id !== guest));
-      return rows.some(g => g.user_id === guest);
+      saveGuests(fakeDb.rows('guests').filter(g => g.user_id !== guest));
+      if (!with_posts) return [];
+      fakeDb.save(fakeDb.rows('cooked_likes').filter(l => l.user_id !== guest), 'cooked_likes');
+      const gone = fakeDb.rows('cooked').filter(c => c.user_id === guest && !c.member);
+      const ids = new Set(gone.map(c => c.id));
+      fakeDb.save(fakeDb.rows('cooked').filter(c => !ids.has(c.id)), 'cooked');
+      return gone.map(c => c.photo_path).filter(Boolean);
+    },
+    leave_guest() {
+      const was = fakeDb.rows('guests').some(g => g.user_id === uid());
+      saveGuests(fakeDb.rows('guests').filter(g => g.user_id !== uid()));
+      return was || null;
+    },
+    // Sharon's People numbers without reading guests' rows (014).
+    guest_counts() {
+      if (!admin()) return [];
+      const plan = read(PLAN_KEY, []), recipes = read(DB_KEY, []);
+      return fakeDb.rows('guests').map(g => ({
+        user_id: g.user_id,
+        planned: plan.filter(p => p.guest_id === g.user_id).length,
+        added: recipes.filter(r => r.owner === g.user_id).length,
+      }));
     },
   };
 
@@ -537,7 +695,8 @@
       if (!USERS.includes(e) || password !== PASSWORD) {
         return { data: { user: null, session: null }, error: { name: 'AuthApiError', code: 'invalid_credentials', status: 400, message: 'Invalid login credentials' } };
       }
-      const s = { access_token: 'fake', user: { id: e, email: e, is_anonymous: false } };
+      const s = { access_token: `fake-${crypto.randomUUID()}`, refresh_token: 'fake-refresh', user: { id: e, email: e, is_anonymous: false } };
+      write(SESSIONS_KEY, { ...read(SESSIONS_KEY, {}), [s.access_token]: s });
       write(SESSION_KEY, s);
       notify('SIGNED_IN', s);
       return { data: { user: s.user, session: s }, error: null };
@@ -545,10 +704,20 @@
     // A new anonymous user each time, like Supabase's; it's nobody until join_family().
     async signInAnonymously() {
       try { await network('signInAnonymously'); } catch (e) { return { data: { user: null, session: null }, error: { name: 'AuthRetryableFetchError', message: e.message, status: 0 } }; }
-      const s = { access_token: 'fake', user: { id: crypto.randomUUID(), email: '', is_anonymous: true } };
+      const s = { access_token: `fake-${crypto.randomUUID()}`, refresh_token: 'fake-refresh', user: { id: crypto.randomUUID(), email: '', is_anonymous: true } };
+      write(SESSIONS_KEY, { ...read(SESSIONS_KEY, {}), [s.access_token]: s });
       write(SESSION_KEY, s);
       notify('SIGNED_IN', s);
       return { data: { user: s.user, session: s }, error: null };
+    },
+    // Back to a session this browser had before (the "Not Mom?" switch going back).
+    async setSession({ access_token }) {
+      try { await network('setSession'); } catch (e) { return { data: { session: null }, error: { message: e.message } }; }
+      const s = read(SESSIONS_KEY, {})[access_token];
+      if (!s) return { data: { session: null }, error: { message: 'Invalid session' } };
+      write(SESSION_KEY, s);
+      notify('SIGNED_IN', s);
+      return { data: { session: s, user: s.user }, error: null };
     },
     async signOut() {
       try { await network('signOut'); } catch (e) { return { error: { message: e.message } }; }
@@ -570,7 +739,12 @@
         auth,
         from: table => new Query(table),
         storage: { from: bucket },
-        async rpc(name, args = {}) {
+        rpc(name, args = {}) {
+          // A function returning rows can be filtered and paged like a table.
+          if (name === 'family_recipes') return new Query('family_recipes');
+          return this.callRpc(name, args);
+        },
+        async callRpc(name, args) {
           try { await network(`rpc ${name}`); } catch (e) { return { data: null, error: netError(e) }; }
           const fn = RPC[name];
           if (!fn) return { data: null, error: { code: 'PGRST202', message: `Could not find the function public.${name}` } };
