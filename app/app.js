@@ -125,7 +125,10 @@ const state = {
   cooked: store.get('cooked', []),
   cookedWho: 'all', // the Cooked tab: 'all' (everyone's photos) or 'mine' (everything I cooked)
   cookDraft: null, // "I cooked this" being written: { row, blob, url, text, posting }
-  likes: store.get('likes', []), // likes on posts (cooked_likes, migration 013): { post, user, name }
+  likes: store.get('likes', []), // likes on posts (cooked_likes, migration 013): { post, user, name, at }
+  // When this person last looked at the likes on their posts (notice_marks,
+  // migration 016): likes after it are new (the dot on the round initial).
+  likesSeenAt: store.get('likesSeenAt', null),
   // The name the app shows for whoever is signed in (my_name(), migration 013):
   // "Mom", "Sharon", or a guest's own name.
   myName: store.get('myName', ''),
@@ -147,13 +150,13 @@ const canEdit = r => (isGuest() ? isMine(r) : !r.owner);
 // name means the screens, the welcome tiles and #recipe/<row> links didn't
 // have to change. Ids never shift, unlike sheet rows.
 
-const COLUMNS = 'id, name, category, status, link, source, notes, ingredients, last_cooked_at, photo_path, effort, meals, tags, owner';
+const COLUMNS = 'id, name, category, status, link, source, notes, ingredients, last_cooked_at, photo_path, effort, meals, tags, owner, steps, steps_source';
 // What a guest gets of Mom's recipes: everything but her private notes. Guests
 // read them through family_recipes() (migration 011), which has no notes column
 // at all, so the notes stay private in the database, not just on screen.
 const FAMILY_COLUMNS = COLUMNS.replace(', notes', '');
 const familyRecipes = () => db().rpc('family_recipes');
-const EDITABLE = ['name', 'category', 'status', 'notes', 'ingredients', 'last_cooked_at', 'photo_path', 'meals', 'tags'];
+const EDITABLE = ['name', 'category', 'status', 'notes', 'ingredients', 'last_cooked_at', 'photo_path', 'meals', 'tags', 'steps', 'steps_source'];
 
 // The collections she can browse on the Recipes tab (recipes.tags, migration
 // 008). A dish can be in either, both or neither. `key` is what's saved.
@@ -220,6 +223,10 @@ function fromDb(d) {
     meals: Array.isArray(d.meals) && d.meals.length ? d.meals : null,
     tags: tidyTags(d.tags), // its collections ('naadan', 'onepot'), or [] for none
     owner: d.owner || null, // null for Mom's recipes; the guest's id for one a guest added
+    // The method, one step each (migration 017); 'video' when written from the
+    // video's description, 'mom' once she typed or changed it.
+    steps: Array.isArray(d.steps) ? d.steps.map(x => String(x || '').trim()).filter(Boolean) : [],
+    steps_source: d.steps_source || '',
   };
 }
 
@@ -365,6 +372,16 @@ async function updateRecipe(recipe, fields) {
       // Collection keys; none is saved as null, like meals.
       const list = tidyTags(fields[f]);
       changes[f] = list.length ? list : null;
+      continue;
+    }
+    if (f === 'steps') {
+      // One step per item; none is saved as "no method yet".
+      const list = (fields[f] || []).map(clean).filter(Boolean);
+      changes[f] = list.length ? list : null;
+      continue;
+    }
+    if (f === 'steps_source') {
+      changes[f] = clean(fields[f]) || null;
       continue;
     }
     if (f === 'meals') {
@@ -901,18 +918,27 @@ async function loadCooked() {
   if (!state.user) return;
   try {
     await requireSession();
-    const [rows, likes] = await Promise.all([
+    const [rows, likes, marks] = await Promise.all([
       query(db().from('cooked').select(COOKED_COLUMNS).order('created_at', { ascending: false }).limit(500)),
       // Before migration 013 there are no likes yet: the posts still show.
-      query(db().from('cooked_likes').select('post_id, user_id, name').limit(5000)).catch(() => null),
+      query(db().from('cooked_likes').select('post_id, user_id, name, created_at').limit(5000)).catch(() => null),
+      // Before migration 016 there's no record of what was seen: nothing shows as new.
+      query(db().from('notice_marks').select('likes_seen_at').limit(1)).catch(() => null),
     ]);
     const deleting = pendingPostDelete && pendingPostDelete.post.id;
     state.cooked = rows.map(fromCookedDb).filter(p => p.id !== deleting);
     store.set('cooked', state.cooked);
     if (likes) {
-      state.likes = likes.map(l => ({ post: l.post_id, user: l.user_id, name: String(l.name || '').trim() }));
+      state.likes = likes.map(l => ({ post: l.post_id, user: l.user_id, name: String(l.name || '').trim(), at: l.created_at || null }));
       store.set('likes', state.likes);
     }
+    if (marks) {
+      // Never looked yet: everything so far counts as seen, so nobody starts with a pile of old likes.
+      state.likesSeenAt = marks[0] ? marks[0].likes_seen_at : (state.likesSeenAt || new Date(0).toISOString());
+      if (!marks[0] && !store.get('likesSeenAt', null)) markLikesSeen();
+      store.set('likesSeenAt', state.likesSeenAt);
+    }
+    refreshMeButtons();
     const hash = location.hash || '#today';
     if (hash === '#cooked' || hash.startsWith('#photo/') || hash === '#me') render();
     else if (hash.startsWith('#recipe/')) refreshCookedSection();
@@ -957,7 +983,8 @@ function myDisplayName() {
 function meButtonHtml() {
   const name = myDisplayName();
   const initial = name === 'You' ? '' : [...name][0].toUpperCase();
-  return `<a class="me-btn" href="#me" aria-label="You: ${esc(name)}">${initial ? esc(initial) : iconSvg('chef-hat')}</a>`;
+  const news = newLikeCount();
+  return `<a class="me-btn${news ? ' has-news' : ''}" href="#me" aria-label="You: ${esc(name)}${news ? `, ${news} new like${news === 1 ? '' : 's'}` : ''}">${initial ? esc(initial) : iconSvg('chef-hat')}</a>`;
 }
 
 // ---- likes ----
@@ -1007,6 +1034,56 @@ async function toggleLike(id) {
     redrawLikes(id);
     toast(e && (e.code === '42P01' || e.code === 'PGRST205') ? 'Likes aren’t switched on yet. Ask Sharon.' : offlineMessage(e));
   }
+}
+
+// ---- like notices ----
+
+/** Likes by other people on my posts, newest first; `fresh` = since I last looked. */
+function likesOnMine() {
+  const me = state.uid || guestId();
+  if (!me) return [];
+  return state.likes
+    .map(l => ({ ...l, post: findPost(l.post) }))
+    .filter(l => l.post && myPost(l.post) && l.user !== me)
+    .map(l => ({ ...l, fresh: !!(l.at && state.likesSeenAt && l.at > state.likesSeenAt) }))
+    .sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+}
+const newLikeCount = () => likesOnMine().filter(l => l.fresh).length;
+
+/** The round initial, with its dot, wherever it's on screen. */
+function refreshMeButtons() {
+  document.querySelectorAll('.me-btn').forEach(el => { el.outerHTML = meButtonHtml(); });
+}
+
+/** Opening the You page: the likes shown there are seen (on every phone). */
+async function markLikesSeen() {
+  const now = new Date().toISOString();
+  state.likesSeenAt = now;
+  store.set('likesSeenAt', now);
+  try {
+    await requireSession();
+    const seen = await query(db().rpc('mark_likes_seen'));
+    if (seen) { state.likesSeenAt = seen; store.set('likesSeenAt', seen); }
+  } catch (e) { /* offline, or before migration 016: this phone remembers */ }
+}
+
+/** "Likes on your posts" on the You page: the newest ten, new ones marked. */
+function likesNoticeHtml(list) {
+  if (!list.length) return '';
+  const fresh = list.filter(l => l.fresh).length;
+  return `<section class="me-section me-likes">
+    <h2 class="section">Likes on your posts${fresh ? ` <span class="count">${fresh} new</span>` : ''}</h2>
+    <ul class="notices">${list.slice(0, 10).map(l => {
+      const r = findRecipe(l.post.row);
+      const dish = r ? displayName(r) : 'a dish';
+      const href = l.post.photo ? `#photo/${l.post.id}` : r ? `#recipe/${r.row}` : '#cooked';
+      return `<li><a class="notice${l.fresh ? ' fresh' : ''}" href="${href}">
+        <span class="notice-icon" aria-hidden="true">${iconSvg('heart')}</span>
+        <span class="notice-text"><b>${esc(l.name || 'Someone')}</b> liked your ${esc(dish)}<span class="notice-when">${esc(l.at ? timeAgo(l.at) : '')}</span></span>
+        ${l.fresh ? '<span class="sr-only">New</span>' : ''}
+      </a></li>`;
+    }).join('')}</ul>
+  </section>`;
 }
 
 function redrawLikes(id) {
@@ -1504,6 +1581,8 @@ function signedOut() {
   state.likes = [];
   store.remove('myName');
   store.remove('likes');
+  state.likesSeenAt = null;
+  store.remove('likesSeenAt');
   state.cooked = [];
   state.cookedWho = 'all';
   state.cookDraft = null;
@@ -2659,6 +2738,7 @@ function renderRecipe(row) {
       ${r.ingredients.length
         ? `<ul class="ingredients">${r.ingredients.map((x, i) => `<li>${ingredientButton(r, x, i)}</li>`).join('')}</ul>`
         : '<p class="muted">No ingredients yet.</p>'}
+      ${methodHtml(r)}
       <div id="r-cooked">${cookedSectionHtml(r)}</div>
     `;
     delete view().dataset.category;
@@ -2686,6 +2766,7 @@ function renderRecipe(row) {
       ${r.ingredients.length
         ? `<ul class="ingredients">${r.ingredients.map((x, i) => `<li>${ingredientButton(r, x, i)}</li>`).join('')}</ul>`
         : '<p class="muted">No ingredients yet.</p>'}
+      ${methodHtml(r)}
       ${String(r.notes).trim() ? `<h2 class="section">Notes</h2><p class="recipe-notes">${esc(r.notes)}</p>` : ''}
       <div id="r-cooked">${cookedSectionHtml(r)}</div>
       ${isRemoved(r) ? `<div class="footer-action">${status === STATUS.removed
@@ -2718,6 +2799,9 @@ function renderRecipe(row) {
 
     <label class="field" for="r-ingredients">Ingredients, one per line</label>
     <textarea id="r-ingredients" placeholder="tomato&#10;chicken&#10;cream">${esc(r.ingredients.join('\n'))}</textarea>
+
+    <label class="field" for="r-steps">Method, one step per line</label>
+    <textarea id="r-steps" class="steps-box" placeholder="Fry the onions till golden&#10;Add the masala and cook 2 minutes">${esc((r.steps || []).join('\n'))}</textarea>
 
     <label class="field" for="r-notes">Notes</label>
     <textarea id="r-notes" placeholder="Use less sugar next time">${esc(r.notes)}</textarea>
@@ -2758,6 +2842,23 @@ function flipToggle(el) {
   const on = el.getAttribute('aria-pressed') !== 'true';
   el.setAttribute('aria-pressed', on);
   return on;
+}
+
+/**
+ * "Method": the numbered steps in large type, after the ingredients. Steps
+ * written from the video say so, with a nudge to check quantities. Without
+ * steps, Mom gets a way to add them; guests see nothing.
+ */
+function methodHtml(r) {
+  const steps = r.steps || [];
+  if (!steps.length) {
+    return canEdit(r) && !isGuest()
+      ? `<h2 class="section">Method</h2><p class="muted method-empty">No steps yet. <button type="button" class="inline-link" data-action="edit-recipe">Add them</button> or follow the video.</p>`
+      : '';
+  }
+  return `<h2 class="section">Method</h2>
+    <ol class="method">${steps.map(x => `<li>${esc(x)}</li>`).join('')}</ol>
+    ${r.steps_source === 'video' ? '<p class="muted small method-note">Steps written from the video. Check quantities with the video if unsure.</p>' : ''}`;
 }
 
 /**
@@ -2905,6 +3006,15 @@ function recipeChanges(r) {
   // Ingredients: one per line (commas work too).
   const list = $('#r-ingredients').value.split(/\n|,/).map(x => x.trim()).filter(Boolean);
   if (list.join('\n') !== r.ingredients.join('\n')) changed.ingredients = list;
+  // Method: one step per line. Changing it makes it hers ('mom'): no "from the video" note.
+  const stepsBox = $('#r-steps');
+  if (stepsBox) {
+    const steps = stepsBox.value.split('\n').map(x => x.replace(/^\s*\d+[.)]\s*/, '').trim()).filter(Boolean);
+    if (steps.join('\n') !== (r.steps || []).join('\n')) {
+      changed.steps = steps;
+      changed.steps_source = steps.length ? 'mom' : null;
+    }
+  }
   // Collections: the toggles that are on, plus any key this version doesn't know.
   const on = [...document.querySelectorAll('[data-tag-toggle][aria-pressed=true]')].map(b => b.dataset.tagToggle);
   const tags = tidyTags([...on, ...tagsOf(r).filter(t => !collectionOf(t))]);
@@ -3542,6 +3652,9 @@ function renderMe() {
   const name = myDisplayName();
   const posts = state.cooked.filter(myPost).length;
   const people = state.visitors && state.visitors.guests ? state.visitors.guests.length : 0;
+  const likes = likesOnMine();
+  // Seen now: they stay marked "new" on this visit, and the dot goes.
+  if (likes.some(l => l.fresh)) setTimeout(markLikesSeen, 0);
   view().innerHTML = `
     ${backHtml()}
     <header class="me-head">
@@ -3555,6 +3668,8 @@ function renderMe() {
     ${guest ? `<div id="me-rename">${renameHtml()}</div>` : `<div id="me-switch">${switchHtml()}</div>`}
 
     <button type="button" class="btn block me-cooked" data-action="my-cooked">${iconSvg('camera')}What I’ve cooked${posts ? ` <span class="count">${posts}</span>` : ''}</button>
+
+    ${likesNoticeHtml(likes)}
 
     ${state.admin && !guest ? `
       <section class="me-section">
@@ -4137,7 +4252,7 @@ document.addEventListener('input', e => {
     state.draft.notes = e.target.value;
   } else if (id === 'cook-say') {
     if (state.cookDraft) state.cookDraft.text = e.target.value;
-  } else if (id === 'r-name' || id === 'r-notes' || id === 'r-ingredients') {
+  } else if (id === 'r-name' || id === 'r-notes' || id === 'r-ingredients' || id === 'r-steps') {
     showRecipeSave();
   }
 });

@@ -1152,3 +1152,44 @@ body:has(.viewer) { background: #17110e; }
 .viewer .viewer-delete { color: #cfc2b8; margin-top: var(--s2); flex: none; }
 /* "Not Mom? Make this phone your own" on the You page. */
 .switch-form { margin-bottom: var(--s4); }
+
+/* ---- like notices ---- */
+/* A coral dot on the round initial when someone liked your post since you last looked. */
+.me-btn.has-news::after {
+  content: ''; position: absolute; top: 0; right: 0;
+  width: 13px; height: 13px; border-radius: 50%;
+  background: var(--brass); box-shadow: 0 0 0 2.5px var(--leaf);
+}
+/* "Likes on your posts" on the You page; new ones bold, with a soft coral wash. */
+.notices { list-style: none; margin: var(--s3) 0 0; padding: 0; display: grid; gap: 6px; }
+.notice {
+  display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 10px 14px;
+  border-radius: var(--r-md); background: var(--leaf-raised); color: var(--text); text-decoration: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+.notice.fresh { background: color-mix(in srgb, var(--brass) 9%, var(--leaf-raised)); }
+.notice-icon { flex: none; color: var(--brass); display: grid; place-items: center; }
+.notice-icon .icon { width: 22px; height: 22px; fill: currentColor; stroke-width: 1.4; }
+.notice-text { min-width: 0; font-size: 16.5px; line-height: 1.35; overflow-wrap: anywhere; }
+.notice:not(.fresh) .notice-text b { font-weight: 600; }
+.notice-when { display: block; font-size: 14px; color: var(--cream-2); margin-top: 1px; }
+.notice:active { transform: scale(0.99); }
+
+/* ---- the Method: big numbered steps, easy to follow at the stove ---- */
+ol.method {
+  list-style: none; counter-reset: step; margin: var(--s3) 0 0; padding: 4px 18px;
+  background: var(--leaf-raised); border-radius: var(--r-xl); box-shadow: var(--shadow-raised);
+}
+ol.method li {
+  counter-increment: step; position: relative; padding: 14px 0 14px 44px;
+  font-size: var(--fs-base); line-height: 1.5; border-bottom: 1px solid var(--hairline);
+}
+ol.method li:last-child { border-bottom: none; }
+ol.method li::before {
+  content: counter(step); position: absolute; left: 0; top: 13px;
+  width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--brass-soft); color: var(--brass); font-weight: 700; font-size: 16px;
+}
+.method-note { margin-top: var(--s2); }
+.method-empty { margin-top: 0; }
+textarea.steps-box { min-height: 180px; line-height: 1.45; }

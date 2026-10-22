@@ -61,7 +61,8 @@
   const COOKED_KEY = `${PREFIX}cooked`;
   const LIKES_KEY = `${PREFIX}cooked-likes`;
   const HANDOVER_KEY = `${PREFIX}handovers`;
-  const SESSIONS_KEY = `${PREFIX}sessions`; // every session this browser had, so setSession can go back
+  const SESSIONS_KEY = `${PREFIX}sessions`;
+  const MARKS_KEY = `${PREFIX}notice-marks`; // every session this browser had, so setSession can go back
   // allowed_users.name (migration 012): the name on Mom's and Sharon's posts.
   const NAMES = { 'mom@example.com': 'Mom', 'me@example.com': 'Sharon' };
   const FIRST_CODE = 'family-test';
@@ -168,7 +169,7 @@
   const TABLES = {
     recipes: {
       key: DB_KEY, seed,
-      blank: () => ({ name: '', category: '', status: '', link_key: '', source: '', notes: '', protein: null, ingredients: null, last_cooked_at: null, photo_path: null, effort: null, meals: null, tags: null, owner: null }),
+      blank: () => ({ name: '', category: '', status: '', link_key: '', source: '', notes: '', protein: null, ingredients: null, last_cooked_at: null, photo_path: null, effort: null, meals: null, tags: null, owner: null, steps: null, steps_source: null }),
       notNull: ['link'],
       canDelete: true, // only a guest's own (the rules), never a family recipe (the trigger)
     },
@@ -207,6 +208,11 @@
       canDelete: true,
       canUpdate: false,
     },
+    // When each person last looked at their likes (migration 016); written by mark_likes_seen().
+    notice_marks: {
+      key: MARKS_KEY, seed: () => [],
+      readOnly: true,
+    },
     // family_recipes() (migration 011): Mom's recipes without the notes. Only through rpc().
     family_recipes: {
       // Not what Mom removed (014).
@@ -234,7 +240,7 @@
     photos: () => Object.keys(read(STORAGE_KEY, {})),
     code: () => read(CODE_KEY, FIRST_CODE),
     reset() {
-      [DB_KEY, SHOP_KEY, PLAN_KEY, STORAGE_KEY, SESSION_KEY, GUESTS_KEY, CODE_KEY, FAILS_KEY, TAGS_FILE_KEY, COOKED_KEY, LIKES_KEY, HANDOVER_KEY, SESSIONS_KEY].forEach(k => localStorage.removeItem(k));
+      [DB_KEY, SHOP_KEY, PLAN_KEY, STORAGE_KEY, SESSION_KEY, GUESTS_KEY, CODE_KEY, FAILS_KEY, TAGS_FILE_KEY, COOKED_KEY, LIKES_KEY, HANDOVER_KEY, SESSIONS_KEY, MARKS_KEY].forEach(k => localStorage.removeItem(k));
       return 'Reset. Reload the page.';
     },
   };
@@ -306,6 +312,7 @@
     },
     guests: { see: () => admin(), add: () => false },
     family_recipes: { see: () => allowed() || isGuest(), add: () => false },
+    notice_marks: { see: r => r.user_id === uid(), add: () => false },
     cooked_likes: {
       see: () => allowed() || isGuest(),
       add: r => (allowed() || isGuest()) && r.user_id === uid(),
@@ -570,6 +577,12 @@
     is_admin: () => admin(),
     is_guest: () => isGuest(),
     my_name: () => myName(),
+    mark_likes_seen() {
+      if (!uid() || !(allowed() || isGuest())) return null;
+      const now = new Date().toISOString();
+      fakeDb.save([...fakeDb.rows('notice_marks').filter(m => m.user_id !== uid()), { user_id: uid(), likes_seen_at: now }], 'notice_marks');
+      return now;
+    },
     // "Not Mom?" (migration 013): Mom's account asks for a handover, then the new guest claims it.
     start_handover({ name }) {
       if (!uid() || !allowed()) throw notAllowed('do this');

@@ -10,8 +10,8 @@
 -- up before a dish could be planned twice needs 007_plan_repeats.sql, one
 -- set up before the Naadan and One pot collections needs 008_tags.sql, and
 -- 009_family_code.sql, 010_admin.sql, 011_private_notes.sql, 012_cooked.sql,
--- 013_likes_names.sql, 014_hardening.sql and 015_photo_upload_fix.sql follow in
--- the same way; this file already includes everything in all of
+-- 013_likes_names.sql, 014_hardening.sql, 015_photo_upload_fix.sql,
+-- 016_like_notices.sql and 017_steps.sql follow in the same way; this file already includes everything in all of
 -- them. Needs Postgres 15 or newer.
 
 -- ---------- recipes ----------
@@ -1453,3 +1453,98 @@ create policy "Guests can add their cooked photos"
               and (storage.foldername(name))[1] = 'cooked'
               and (storage.foldername(name))[2] = (select auth.uid())::text
               and (select public.my_cooked_photo_count()) < 100);
+
+-- ---------- like notices (016) ----------
+
+create table if not exists public.notice_marks (
+  user_id uuid primary key references auth.users (id) on delete cascade,
+  likes_seen_at timestamptz not null default now()
+);
+
+alter table public.notice_marks enable row level security;
+revoke all on public.notice_marks from anon, authenticated;
+grant select on public.notice_marks to authenticated;
+
+drop policy if exists "People read their own marks" on public.notice_marks;
+create policy "People read their own marks"
+  on public.notice_marks for select to authenticated
+  using (user_id = (select auth.uid()));
+
+-- "I've seen my likes": now, for whoever is signed in (Mom, Sharon or a guest).
+create or replace function public.mark_likes_seen() returns timestamptz
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  uid uuid := auth.uid();
+  seen timestamptz := now();
+begin
+  if uid is null or not (public.is_allowed() or public.is_guest()) then
+    return null;
+  end if;
+  insert into public.notice_marks as m (user_id, likes_seen_at) values (uid, seen)
+  on conflict (user_id) do update set likes_seen_at = excluded.likes_seen_at;
+  return seen;
+end;
+$$;
+
+revoke execute on function public.mark_likes_seen() from public, anon;
+grant execute on function public.mark_likes_seen() to authenticated;
+
+-- ---------- the cooking method (017) ----------
+
+alter table public.recipes add column if not exists steps text[];
+alter table public.recipes add column if not exists steps_source text;
+
+-- The app may write them (014 lists the writable columns one by one).
+grant insert (steps, steps_source) on public.recipes to authenticated;
+grant update (steps, steps_source) on public.recipes to authenticated;
+
+drop function if exists public.family_recipes();
+create function public.family_recipes()
+returns table (
+  id bigint, name text, category text, status text, link text, link_key text, source text,
+  ingredients text[], last_cooked_at timestamptz, photo_path text, effort text,
+  meals text[], tags text[], owner uuid, steps text[], steps_source text
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select r.id, r.name, r.category, r.status, r.link, r.link_key, r.source, r.ingredients,
+         r.last_cooked_at, r.photo_path, r.effort, r.meals, r.tags, r.owner, r.steps, r.steps_source
+  from public.recipes r
+  where r.owner is null and (public.is_guest() or public.is_allowed())
+    and r.status !~* '^\s*not\s+interested' and r.name !~* '\mignore\M';
+$$;
+
+revoke execute on function public.family_recipes() from public, anon;
+grant execute on function public.family_recipes() to authenticated;
+
+-- Guests' own recipes: at most 60 steps of 1,000 characters (as 014 limits the rest).
+create or replace function public.guest_steps_limit() returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if coalesce(auth.jwt() ->> 'role', '') not in ('anon', 'authenticated') or public.is_allowed() then
+    return new;
+  end if;
+  if coalesce(array_length(new.steps, 1), 0) > 60
+     or exists (select 1 from unnest(coalesce(new.steps, '{}')) s where char_length(s) > 1000)
+     or char_length(coalesce(new.steps_source, '')) > 20 then
+    raise exception 'That method is too long to save.' using errcode = '22001';
+  end if;
+  return new;
+end;
+$$;
+
+revoke execute on function public.guest_steps_limit() from public, anon, authenticated;
+
+drop trigger if exists recipes_guest_steps_limit on public.recipes;
+create trigger recipes_guest_steps_limit before insert or update on public.recipes
+  for each row execute function public.guest_steps_limit();
