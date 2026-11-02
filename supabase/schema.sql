@@ -11,7 +11,7 @@
 -- set up before the Naadan and One pot collections needs 008_tags.sql, and
 -- 009_family_code.sql, 010_admin.sql, 011_private_notes.sql, 012_cooked.sql,
 -- 013_likes_names.sql, 014_hardening.sql, 015_photo_upload_fix.sql,
--- 016_like_notices.sql and 017_steps.sql follow in the same way; this file already includes everything in all of
+-- 016_like_notices.sql, 017_steps.sql and 018_diet.sql follow in the same way; this file already includes everything in all of
 -- them. Needs Postgres 15 or newer.
 
 -- ---------- recipes ----------
@@ -1548,3 +1548,34 @@ revoke execute on function public.guest_steps_limit() from public, anon, authent
 drop trigger if exists recipes_guest_steps_limit on public.recipes;
 create trigger recipes_guest_steps_limit before insert or update on public.recipes
   for each row execute function public.guest_steps_limit();
+
+-- ---------- Veg mode (018) ----------
+
+alter table public.recipes add column if not exists diet text;
+alter table public.recipes drop constraint if exists recipes_diet_known;
+alter table public.recipes add constraint recipes_diet_known check (diet is null or diet in ('veg', 'nonveg'));
+
+grant insert (diet) on public.recipes to authenticated;
+grant update (diet) on public.recipes to authenticated;
+
+drop function if exists public.family_recipes();
+create function public.family_recipes()
+returns table (
+  id bigint, name text, category text, status text, link text, link_key text, source text,
+  ingredients text[], last_cooked_at timestamptz, photo_path text, effort text,
+  meals text[], tags text[], owner uuid, steps text[], steps_source text, diet text
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select r.id, r.name, r.category, r.status, r.link, r.link_key, r.source, r.ingredients,
+         r.last_cooked_at, r.photo_path, r.effort, r.meals, r.tags, r.owner, r.steps, r.steps_source, r.diet
+  from public.recipes r
+  where r.owner is null and (public.is_guest() or public.is_allowed())
+    and r.status !~* '^\s*not\s+interested' and r.name !~* '\mignore\M';
+$$;
+
+revoke execute on function public.family_recipes() from public, anon;
+grant execute on function public.family_recipes() to authenticated;

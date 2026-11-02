@@ -1193,3 +1193,19 @@ ol.method li::before {
 .method-note { margin-top: var(--s2); }
 .method-empty { margin-top: 0; }
 textarea.steps-box { min-height: 180px; line-height: 1.45; }
+
+/* ---- Veg mode: a leaf switch beside Quick & easy / Gourmet, and beside "What do you have?" on Recipes ---- */
+.effort-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.have-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.veg-toggle {
+  flex: none; display: inline-flex; align-items: center; gap: 6px;
+  min-height: 44px; padding: 6px 14px 6px 10px; border-radius: 999px;
+  border: 1.5px solid var(--line-strong); background: none; box-shadow: none;
+  color: var(--cream-2); font-size: 16px; font-weight: 600;
+}
+.veg-toggle .icon { width: 20px; height: 20px; stroke-width: 1.6; }
+.veg-toggle[aria-pressed=true] {
+  border-color: var(--green-fg); background: var(--green-bg); color: var(--green-fg); font-weight: 700;
+}
+.veg-toggle:active { transform: scale(0.97); }
+.diet-choice { margin-top: var(--s2); }

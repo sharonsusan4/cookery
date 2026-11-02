@@ -134,6 +134,9 @@ const state = {
   myName: store.get('myName', ''),
   renaming: false, // the "Change my name" box is open on the You page
   switching: false, // the "Not Mom?" box is open on the You page
+  // Veg mode: hide non-veg dishes (meat, fish and seafood, egg) everywhere.
+  // Each person's own switch, remembered on their phone until they turn it off.
+  vegOnly: store.get('vegOnly', false),
 };
 
 /** True when a family member is using the app as a guest (came in with the family code). */
@@ -150,13 +153,13 @@ const canEdit = r => (isGuest() ? isMine(r) : !r.owner);
 // name means the screens, the welcome tiles and #recipe/<row> links didn't
 // have to change. Ids never shift, unlike sheet rows.
 
-const COLUMNS = 'id, name, category, status, link, source, notes, ingredients, last_cooked_at, photo_path, effort, meals, tags, owner, steps, steps_source';
+const COLUMNS = 'id, name, category, status, link, source, notes, ingredients, last_cooked_at, photo_path, effort, meals, tags, owner, steps, steps_source, diet';
 // What a guest gets of Mom's recipes: everything but her private notes. Guests
 // read them through family_recipes() (migration 011), which has no notes column
 // at all, so the notes stay private in the database, not just on screen.
 const FAMILY_COLUMNS = COLUMNS.replace(', notes', '');
 const familyRecipes = () => db().rpc('family_recipes');
-const EDITABLE = ['name', 'category', 'status', 'notes', 'ingredients', 'last_cooked_at', 'photo_path', 'meals', 'tags', 'steps', 'steps_source'];
+const EDITABLE = ['name', 'category', 'status', 'notes', 'ingredients', 'last_cooked_at', 'photo_path', 'meals', 'tags', 'steps', 'steps_source', 'diet'];
 
 // The collections she can browse on the Recipes tab (recipes.tags, migration
 // 008). A dish can be in either, both or neither. `key` is what's saved.
@@ -224,9 +227,11 @@ function fromDb(d) {
     tags: tidyTags(d.tags), // its collections ('naadan', 'onepot'), or [] for none
     owner: d.owner || null, // null for Mom's recipes; the guest's id for one a guest added
     // The method, one step each (migration 017); 'video' when written from the
-    // video's description, 'mom' once she typed or changed it.
+    // video's description, 'speech' from what's said in it (its captions),
+    // 'mom' once she typed or changed it.
     steps: Array.isArray(d.steps) ? d.steps.map(x => String(x || '').trim()).filter(Boolean) : [],
     steps_source: d.steps_source || '',
+    diet: d.diet === 'veg' || d.diet === 'nonveg' ? d.diet : '', // Mom's own veg / non-veg, or '' to let the app decide
   };
 }
 
@@ -378,6 +383,10 @@ async function updateRecipe(recipe, fields) {
       // One step per item; none is saved as "no method yet".
       const list = (fields[f] || []).map(clean).filter(Boolean);
       changes[f] = list.length ? list : null;
+      continue;
+    }
+    if (f === 'diet') {
+      changes[f] = fields[f] === 'veg' || fields[f] === 'nonveg' ? fields[f] : null;
       continue;
     }
     if (f === 'steps_source') {
@@ -1577,6 +1586,8 @@ function signedOut() {
   state.uid = null;
   state.myName = '';
   state.switching = false;
+  state.vegOnly = false;
+  store.remove('vegOnly');
   state.renaming = false;
   state.likes = [];
   store.remove('myName');
@@ -1855,7 +1866,56 @@ function effortOf(r) {
  * storage idea (those are only for the Recipes tab).
  */
 function mealRecipes() {
-  return state.recipes.filter(r => String(r.name).trim() && !isRemoved(r) && effortOf(r) !== 'storage');
+  return state.recipes.filter(r => String(r.name).trim() && !isRemoved(r) && effortOf(r) !== 'storage' && dietShown(r));
+}
+
+// ---------- Veg mode ----------
+// A dish is non-veg when its name, ingredients or method have meat, chicken, fish,
+// prawns or other seafood, or egg in them (Malayalam and Hindi names too:
+// kozhi, meen, chemmeen, mutta, anda). "Eggless", "without egg" and "no egg"
+// don't count. Mom's own answer in Edit (recipes.diet) always wins.
+
+const NONVEG_RULES = [{ icon: 'nonveg', words: [
+  'chicken*', 'beef', 'mutton', 'pork', 'duck', 'lamb', 'goat', 'kheema', 'keema', 'kozhi*', 'murg', 'murgh',
+  'shawarma', 'sharwama', 'meat', 'meatball', 'liver', 'boti', 'bacon', 'ham', 'salami', 'pepperoni', 'turkey',
+  'sausage', 'hot dog', 'nugget',
+  'fish', 'meen*', 'prawn', 'chemmeen*', 'konju', 'ayala', 'mathi', 'sardine', 'karimeen', 'neymeen', 'nemeen', 'seer',
+  'pomfret', 'tuna', 'salmon', 'mackerel', 'squid', 'koonthal', 'kanava', 'crab', 'njandu', 'kakka', 'clam', 'mussel',
+  'kallummakaya', 'anchovy', 'netholi', 'nethili', 'seafood', 'lobster', 'oyster',
+  'egg', 'mutta*', 'omelette', 'omelet', 'bull eye', 'bulls eye', 'anda',
+] }];
+
+const dietCache = new Map();
+/** 'veg' or 'nonveg', worked out from the name and ingredients. */
+function autoDiet(r) {
+  const steps = r.steps || [];
+  const key = `${r.name}\u0000${r.ingredients.join(',')}\u0000${steps.join('\u0001')}`;
+  if (!dietCache.has(key)) {
+    const without = t => String(t).toLowerCase()
+      .replace(/\b(egg[\s-]?less|egg[\s-]?free)\b/g, ' ')
+      .replace(/\b(without|no)\s+[\p{L}-]+/gu, ' ');
+    // The method counts too: a cake's steps say "add 1 egg" even when the ingredients don't.
+    const text = simplePhrase([without(r.name), ...r.ingredients.map(without), ...steps.map(without)].join(' , '));
+    dietCache.set(key, iconFromRules(NONVEG_RULES, text) ? 'nonveg' : 'veg');
+  }
+  return dietCache.get(key);
+}
+/** Mom's answer if she gave one, else the app's. */
+const dietOf = r => r.diet || autoDiet(r);
+/** Whether a dish shows with Veg mode as it is. */
+const dietShown = r => !state.vegOnly || dietOf(r) === 'veg';
+
+/** The Veg switch, on Today and in the Recipes shortcut row. */
+function vegToggleHtml() {
+  return `<button type="button" class="veg-toggle" data-veg aria-pressed="${state.vegOnly}" aria-label="Veg only${state.vegOnly ? ', on' : ''}">${iconSvg('leaf')}Veg</button>`;
+}
+
+function toggleVeg() {
+  state.vegOnly = !state.vegOnly;
+  store.set('vegOnly', state.vegOnly);
+  state.suggestion = null;
+  render();
+  toast(state.vegOnly ? 'Veg only: non-veg dishes are hidden' : 'Showing all dishes');
 }
 
 /**
@@ -2034,8 +2094,11 @@ function renderToday() {
           ${MEAL_NAMES.map(m => `<option${m === meal ? ' selected' : ''}>${m}</option>`).join('')}
         </select>
       </label>
-      <div class="effort-switch" role="group" aria-label="Quick and easy, or gourmet">
-        ${Object.entries(EFFORTS).map(([k, label]) => `<button type="button" data-effort="${k}" aria-pressed="${k === effort}">${esc(label)}</button>`).join('')}
+      <div class="effort-row">
+        <div class="effort-switch" role="group" aria-label="Quick and easy, or gourmet">
+          ${Object.entries(EFFORTS).map(([k, label]) => `<button type="button" data-effort="${k}" aria-pressed="${k === effort}">${esc(label)}</button>`).join('')}
+        </div>
+        ${vegToggleHtml()}
       </div>
     </header>
 
@@ -2045,7 +2108,7 @@ function renderToday() {
       <section class="hero" id="suggestion">${suggestionHtml()}</section>
       <h2 class="section meal-all">All ${esc(what)} <span class="count">${all.length}</span></h2>
       <div class="squares meal-grid">${all.map(r => squareHtml({ r, match: null }, { status: false })).join('')}</div>
-    ` : `<p class="muted meal-empty">${state.recipes.length || !state.loading ? `No ${esc(what)} yet.` : 'Loading your recipes…'}</p>`}
+    ` : `<p class="muted meal-empty">${state.recipes.length || !state.loading ? (state.vegOnly ? `No veg ${esc(what)} yet.` : `No ${esc(what)} yet.`) : 'Loading your recipes…'}</p>`}
 
     ${sides.length ? `
       <h2 class="section side-heading">On the side</h2>
@@ -2338,6 +2401,7 @@ function missingTerms(r, terms) {
 function runSearch(f = state.filters) {
   const list = state.recipes.filter(r => {
     if (f.showRemoved !== isRemoved(r)) return false;
+    if (!f.showRemoved && !dietShown(r)) return false;
     if (!f.showRemoved && f.status !== 'all' && statusOf(r) !== f.status) return false;
     if (f.category && categoryOf(r) !== f.category) return false;
     if (!f.showRemoved && f.collection && !inCollection(r, f.collection)) return false;
@@ -2401,7 +2465,7 @@ const CHIP_EXTRAS = ['cream', 'cashew', 'coconut', 'tomato'];
 
 /** Ingredient words for the chips: her proteins first, then the few extras she searches with. */
 function ingredientChips() {
-  const recipes = state.recipes.filter(r => !isRemoved(r));
+  const recipes = state.recipes.filter(r => !isRemoved(r) && dietShown(r));
   const texts = recipes.map(r => ({ text: simplePhrase([r.name, ...r.ingredients].join(' , ')), name: simplePhrase(r.name) }));
   const used = word => texts.some(t => termMatches(t.text, t.name, simplePhrase(word)));
   // Her proteins, then the few things she searches with for main dishes.
@@ -2571,7 +2635,10 @@ function pickShortcut(key) {
 function haveHtml() {
   const open = !!state.haveOpen;
   return `<div class="have">
-    <button type="button" class="have-btn" data-action="have-toggle" aria-expanded="${open}" aria-controls="have-panel">What do you have?<svg class="have-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 9l6 6l6 -6"/></svg></button>
+    <div class="have-row">
+      <button type="button" class="have-btn" data-action="have-toggle" aria-expanded="${open}" aria-controls="have-panel">What do you have?<svg class="have-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 9l6 6l6 -6"/></svg></button>
+      ${vegToggleHtml()}
+    </div>
     <p class="have-summary" id="have-summary" hidden></p>
     <div class="have-panel" id="have-panel"${open ? '' : ' hidden'}>${chipsHtml()}</div>
   </div>`;
@@ -2728,7 +2795,7 @@ function renderRecipe(row) {
       ${backHtml()}
       <div id="r-picture">${pictureHtml(r)}</div>
       <h1 class="dish-title">${esc(displayName(r))}</h1>
-      <p class="muted">${esc(category || 'No category')} · ${esc(momSays(r))}</p>
+      <p class="muted">${esc(category || 'No category')} · ${esc(momSays(r))} · ${dietOf(r) === 'veg' ? 'Veg' : 'Non-veg'}</p>
       ${collectionsLine(r)}
 
       <a class="btn primary block" href="${esc(webLink(r.link))}" target="_blank" rel="noopener">${esc(openLabel(r))}</a>
@@ -2754,7 +2821,7 @@ function renderRecipe(row) {
       </div>
       <div id="r-picture">${pictureHtml(r)}</div>
       <h1 class="dish-title">${esc(displayName(r))}</h1>
-      <p class="muted">${isMine(r) ? 'Yours · ' : ''}${esc(category || 'No category')} · ${esc(statusLabel(r))}</p>
+      <p class="muted">${isMine(r) ? 'Yours · ' : ''}${esc(category || 'No category')} · ${esc(statusLabel(r))} · ${dietOf(r) === 'veg' ? 'Veg' : 'Non-veg'}</p>
       ${collectionsLine(r)}
       <p class="muted meals-line">${meals.length ? `Shows in: ${esc(meals.join(', '))}` : 'Not in any meal yet'}</p>
       <div id="r-made">${recipeMadeHtml(r)}</div>
@@ -2799,6 +2866,12 @@ function renderRecipe(row) {
 
     <label class="field" for="r-ingredients">Ingredients, one per line</label>
     <textarea id="r-ingredients" placeholder="tomato&#10;chicken&#10;cream">${esc(r.ingredients.join('\n'))}</textarea>
+
+    <p class="field-label" id="r-diet-label">Veg or non-veg</p>
+    <div class="segmented diet-choice" id="r-diet" role="group" aria-labelledby="r-diet-label">
+      ${[['', `Auto (${autoDiet(r) === 'veg' ? 'veg' : 'non-veg'})`], ['veg', 'Veg'], ['nonveg', 'Non-veg']].map(([v, label]) =>
+        `<button type="button" data-diet="${v}" aria-pressed="${(r.diet || '') === v}">${esc(label)}</button>`).join('')}
+    </div>
 
     <label class="field" for="r-steps">Method, one step per line</label>
     <textarea id="r-steps" class="steps-box" placeholder="Fry the onions till golden&#10;Add the masala and cook 2 minutes">${esc((r.steps || []).join('\n'))}</textarea>
@@ -2858,7 +2931,8 @@ function methodHtml(r) {
   }
   return `<h2 class="section">Method</h2>
     <ol class="method">${steps.map(x => `<li>${esc(x)}</li>`).join('')}</ol>
-    ${r.steps_source === 'video' ? '<p class="muted small method-note">Steps written from the video. Check quantities with the video if unsure.</p>' : ''}`;
+    ${r.steps_source === 'video' ? '<p class="muted small method-note">Steps written from the video. Check quantities with the video if unsure.</p>'
+      : r.steps_source === 'speech' ? '<p class="muted small method-note">Steps written from what’s said in the video. Check with the video if unsure.</p>' : ''}`;
 }
 
 /**
@@ -3006,6 +3080,9 @@ function recipeChanges(r) {
   // Ingredients: one per line (commas work too).
   const list = $('#r-ingredients').value.split(/\n|,/).map(x => x.trim()).filter(Boolean);
   if (list.join('\n') !== r.ingredients.join('\n')) changed.ingredients = list;
+  // Veg or non-veg: '' lets the app decide.
+  const dietBtn = document.querySelector('#r-diet [aria-pressed=true]');
+  if (dietBtn && (dietBtn.dataset.diet || '') !== (r.diet || '')) changed.diet = dietBtn.dataset.diet || null;
   // Method: one step per line. Changing it makes it hers ('mom'): no "from the video" note.
   const stepsBox = $('#r-steps');
   if (stepsBox) {
@@ -4323,6 +4400,7 @@ document.addEventListener('click', async e => {
   const hash = location.hash || '#today';
 
   if (ds.action === 'back') return goBack();
+  if ('veg' in ds) return toggleVeg();
 
   // "I cooked this", the Cooked tab and a photo opened large
   if (ds.like) return toggleLike(ds.like);
@@ -4369,6 +4447,10 @@ document.addEventListener('click', async e => {
     if (!canEdit(r)) return; // a guest on one of Mom's recipes: nothing below is for them
     // Edit form: the collection toggles only change on screen until Save.
     if (ds.tagToggle && String(state.editing) === String(r.row)) { flipToggle(el); return showRecipeSave(); }
+    if ('diet' in ds && String(state.editing) === String(r.row)) {
+      document.querySelectorAll('#r-diet [data-diet]').forEach(b => b.setAttribute('aria-pressed', b === el));
+      return showRecipeSave();
+    }
     if (ds.action === 'meals-open') { state.mealsOpen = String(r.row); return refreshMeals(r); }
     if (ds.action === 'meals-close') { state.mealsOpen = null; return refreshMeals(r); }
     if (ds.mealToggle) return toggleMeal(r, ds.mealToggle);

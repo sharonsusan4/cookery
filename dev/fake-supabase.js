@@ -169,7 +169,7 @@
   const TABLES = {
     recipes: {
       key: DB_KEY, seed,
-      blank: () => ({ name: '', category: '', status: '', link_key: '', source: '', notes: '', protein: null, ingredients: null, last_cooked_at: null, photo_path: null, effort: null, meals: null, tags: null, owner: null, steps: null, steps_source: null }),
+      blank: () => ({ name: '', category: '', status: '', link_key: '', source: '', notes: '', protein: null, ingredients: null, last_cooked_at: null, photo_path: null, effort: null, meals: null, tags: null, owner: null, steps: null, steps_source: null, diet: null }),
       notNull: ['link'],
       canDelete: true, // only a guest's own (the rules), never a family recipe (the trigger)
     },
